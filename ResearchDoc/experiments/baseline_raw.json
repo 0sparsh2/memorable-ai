@@ -1,0 +1,69 @@
+{
+  "results": {
+    "mode": "full",
+    "conversations": 1,
+    "questions_evaluated": 10,
+    "by_category": {
+      "temporal": {
+        "count": 6,
+        "f1_mean": 0.04761904761904762,
+        "judge_accuracy": 0.0,
+        "evidence_recall_mean": 0.8333333333333334
+      },
+      "open_domain": {
+        "count": 1,
+        "f1_mean": 0.0,
+        "judge_accuracy": 0.0,
+        "evidence_recall_mean": 0.0
+      },
+      "multi_hop": {
+        "count": 3,
+        "f1_mean": 0.3333333333333333,
+        "judge_accuracy": 0.3333333333333333,
+        "evidence_recall_mean": 0.3333333333333333
+      },
+      "overall": {
+        "count": 10,
+        "f1_mean": 0.1285714285714286,
+        "judge_accuracy": 0.1
+      }
+    },
+    "overall_f1": 0.1285714285714286,
+    "overall_judge_accuracy": 0.1,
+    "rows": null
+  },
+  "comparison": {
+    "memorable": {
+      "single_hop": null,
+      "multi_hop": 0.3333333333333333,
+      "temporal": 0.04761904761904762,
+      "open_domain": 0.0,
+      "overall": 0.1
+    },
+    "mem0_baseline": {
+      "single_hop": 0.85,
+      "multi_hop": 0.72,
+      "temporal": 0.68,
+      "open_domain": 0.65,
+      "overall": 0.725
+    },
+    "improvement": {
+      "single_hop": -0.85,
+      "multi_hop": -0.38666666666666666,
+      "temporal": -0.6323809523809524,
+      "open_domain": -0.65,
+      "overall": -0.625
+    }
+  },
+  "experiment_id": "baseline_raw",
+  "hypothesis": "Original: raw ingest, minimal context (no session dates in QA).",
+  "config": {
+    "ingest_mode": "raw",
+    "context_format": "minimal",
+    "no_llm": false,
+    "conversations": 1,
+    "questions": 10
+  },
+  "timestamp": "2026-05-17T18:56:00.779212+00:00",
+  "note": "Restored from measured_subset.json (valid run); reruns hit NIM 429."
+}

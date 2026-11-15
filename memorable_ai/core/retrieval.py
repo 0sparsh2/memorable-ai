@@ -1,232 +1,376 @@
 """
-Hybrid Retrieval System
+Hybrid retrieval across memory layers.
 
-Combines semantic search, keyword search, and graph traversal.
-Inspired by Mem0's research-backed retrieval techniques.
+Facts (L2) are ranked by fusing three signals with weighted Reciprocal Rank
+Fusion (Cormack et al., 2009):
 
-Reference: "Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory"
-arXiv:2504.19413 (April 2025)
+* **dense**: cosine over fact embeddings (shared in-process vector index)
+* **lexical**: BM25 (SQLite FTS5, or the in-process index on other databases)
+* **graph**: Personalized PageRank over the knowledge graph, seeded by entities
+  in the query and by the top dense hits (HippoRAG 2 style). This recovers
+  multi-hop facts that share no words with the query.
+
+Episodes (L1) and verbatim turns (L0) are ranked separately, with dense + lexical
+RRF, and fill their own slots in the context block. Mixing a 10-word fact with a
+200-word excerpt in one ranked list favours whichever signal likes long text.
+
+Every signal is filtered by namespace and user *inside* the search. The old code
+filtered nothing on the injection path, so one user's memories could be injected
+into another user's prompt.
+
+The old fusion summed raw scores, so unbounded BM25 (2-15) swamped cosine (0-1).
+RRF fuses ranks and does not have that problem.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
 import numpy as np
-from sentence_transformers import SentenceTransformer
+
+from memorable_ai.core.context import ContextBuilder
+from memorable_ai.core.episodic import message_text
+from memorable_ai.core.scope import Scope
+from memorable_ai.core.vector_index import reciprocal_rank_fusion, tokenize
 
 logger = logging.getLogger(__name__)
 
+_ANAPHORA = re.compile(r"\b(it|that|this|those|these|he|she|they|him|her|them|there|then|one)\b", re.I)
+_GENERIC = ("describe me", "tell me about me", "who am i", "what do you know", "about me", "remember about me")
+
 
 class HybridRetriever:
-    """
-    Hybrid retrieval system combining:
-    - Semantic search (vector embeddings)
-    - Keyword search (full-text)
-    - Graph traversal (if graph enabled)
-    """
+    """Retrieves facts, episodes and excerpts for a query within a user scope."""
 
     def __init__(
         self,
         storage: Any,
-        embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
+        embedding_model: Any = None,
         graph: Optional[Any] = None,
+        semantic_weight: float = 0.5,
+        bm25_weight: float = 1.0,
+        entity_weight: float = 0.0,
+        graph_weight: float = 0.6,
+        knowledge_graph: Optional[Any] = None,
+        rrf_k: int = 60,
+        min_semantic_score: float = 0.2,
+        rerank: bool = False,
+        rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        max_context_tokens: int = 2000,
+        max_facts: int = 10,
+        max_episodes: int = 3,
+        max_excerpts: int = 3,
+        include_shared: bool = False,
+        profile_facts: int = 3,
     ):
-        """
-        Initialize hybrid retriever.
-        
-        Args:
-            storage: Storage instance
-            embedding_model: Model for generating embeddings
-            graph: Optional graph instance for graph-based retrieval
-        """
+        from memorable_ai.core.embeddings import as_embedder, get_embedder
+
         self.storage = storage
+        self.embedder = as_embedder(embedding_model) if embedding_model is not None else get_embedder()
+        # Back-compat: callers test ``retriever.embedding_model`` for truthiness.
+        self.embedding_model = self.embedder
+        self.embedding_model_name = getattr(self.embedder, "model_name", str(embedding_model))
+        from memorable_ai.graph.knowledge_graph import KnowledgeGraph
+
+        if knowledge_graph is None and isinstance(graph, KnowledgeGraph):
+            knowledge_graph = graph
         self.graph = graph
-        self.embedding_model_name = embedding_model
-        
-        # Load embedding model
+        self.knowledge_graph = knowledge_graph
+        self.semantic_weight = semantic_weight
+        self.bm25_weight = bm25_weight
+        self.entity_weight = entity_weight
+        self.graph_weight = graph_weight + max(entity_weight, 0.0)
+        self.rrf_k = rrf_k
+        self.min_semantic_score = min_semantic_score
+        self.rerank = rerank
+        self.rerank_model = rerank_model
+        self._reranker = None
+        self.include_shared = include_shared
+        self.max_facts = max_facts
+        self.max_episodes = max_episodes
+        self.max_excerpts = max_excerpts
+        self.profile_facts = profile_facts
+        self.context_builder = ContextBuilder(max_tokens=max_context_tokens)
+
+    # ------------------------------------------------------------------ scope helpers
+
+    def _scope(self, scope: Optional[Scope]) -> Scope:
+        return scope or Scope(namespace=getattr(self.storage, "namespace", None))
+
+    def _dense_floor(self) -> float:
+        return self.min_semantic_score if getattr(self.embedder, "is_semantic", False) else 0.05
+
+    # ------------------------------------------------------------------ query
+
+    def _extract_query(self, messages: Sequence[Any]) -> str:
+        """Last user message; short or anaphoric follow-ups include the previous one."""
+        user_msgs: List[str] = []
+        for msg in reversed(messages or []):
+            if isinstance(msg, str):
+                user_msgs.append(msg)
+            elif isinstance(msg, dict) and msg.get("role") == "user":
+                text = message_text(msg.get("content"))
+                if text.strip():
+                    user_msgs.append(text.strip())
+            if len(user_msgs) == 2:
+                break
+        if not user_msgs:
+            return ""
+        query = user_msgs[0]
+        if len(user_msgs) > 1 and (len(tokenize(query)) < 4 or _ANAPHORA.search(query)):
+            query = f"{user_msgs[1]}\n{query}"
+        return query[-2000:]
+
+    def _encode(self, query: str) -> Optional[np.ndarray]:
+        if self.embedder is None:
+            return None
         try:
-            self.embedding_model = SentenceTransformer(embedding_model)
-            logger.info(f"Loaded embedding model: {embedding_model}")
+            encode_query = getattr(self.embedder, "encode_query", None)
+            return encode_query(query) if encode_query else self.embedder.encode(query)
         except Exception as e:
-            logger.warning(f"Failed to load embedding model: {e}")
-            self.embedding_model = None
+            logger.debug("Query embedding failed: %s", e)
+            return None
+
+    # ------------------------------------------------------------------ ranking
+
+    def rank_facts(
+        self,
+        query: str,
+        scope: Optional[Scope] = None,
+        k: int = 10,
+        memory_type: Optional[str] = None,
+        qvec: Optional[np.ndarray] = None,
+    ) -> List[Tuple[int, float]]:
+        scope = self._scope(scope)
+        pool = max(k * 3, 20)
+        lists: Dict[str, List[int]] = {}
+        if qvec is None:
+            qvec = self._encode(query)
+        dense_ids: List[int] = []
+        if qvec is not None and self.semantic_weight > 0:
+            floor = self._dense_floor()
+            hits = self.storage.vector_search(
+                "fact", qvec, k=pool, user_id=scope.user_id, include_shared=self.include_shared
+            )
+            dense_ids = [i for i, s in hits if s >= floor]
+            lists["semantic"] = dense_ids
+        if self.bm25_weight > 0:
+            lists["lexical"] = [
+                i
+                for i, _ in self.storage.lexical_search(
+                    "fact", query, k=pool, user_id=scope.user_id,
+                    include_shared=self.include_shared, memory_type=memory_type,
+                )
+            ]
+        if self.knowledge_graph is not None and self.graph_weight > 0:
+            try:
+                lists["graph"] = [
+                    i
+                    for i, _ in self.knowledge_graph.ppr(
+                        query, scope, k=pool, seed_memory_ids=dense_ids[:3],
+                        include_shared=self.include_shared,
+                    )
+                ]
+            except Exception as e:
+                logger.debug("Graph signal failed: %s", e)
+        fused = reciprocal_rank_fusion(
+            lists,
+            {"semantic": self.semantic_weight, "lexical": self.bm25_weight, "graph": self.graph_weight},
+            k=self.rrf_k,
+        )
+        return fused[: max(k * 2, k)]
+
+    def _rank_layer(
+        self, kind: str, query: str, qvec: Optional[np.ndarray], scope: Scope, k: int
+    ) -> List[int]:
+        pool = max(k * 4, 12)
+        lists: Dict[str, List[int]] = {}
+        if qvec is not None:
+            floor = self._dense_floor()
+            lists["semantic"] = [
+                i
+                for i, s in self.storage.vector_search(
+                    kind, qvec, k=pool, user_id=scope.user_id, include_shared=self.include_shared
+                )
+                if s >= floor
+            ]
+        lists["lexical"] = [
+            i
+            for i, _ in self.storage.lexical_search(
+                kind, query, k=pool, user_id=scope.user_id, include_shared=self.include_shared
+            )
+        ]
+        fused = reciprocal_rank_fusion(
+            lists, {"semantic": self.semantic_weight, "lexical": self.bm25_weight}, k=self.rrf_k
+        )
+        return [i for i, _ in fused]
+
+    def _rerank(self, query: str, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not self.rerank or len(items) < 2:
+            return items
+        try:
+            if self._reranker is None:
+                from sentence_transformers import CrossEncoder
+
+                self._reranker = CrossEncoder(self.rerank_model)
+            scores = self._reranker.predict([(query, m.get("content", "")) for m in items])
+            order = np.argsort(-np.asarray(scores))
+            return [items[i] for i in order]
+        except Exception as e:
+            logger.debug("Rerank unavailable: %s", e)
+            self.rerank = False
+            return items
+
+    # ------------------------------------------------------------------ public API
+
+    async def recall(
+        self,
+        query: str,
+        scope: Optional[Scope] = None,
+        k_facts: Optional[int] = None,
+        k_episodes: Optional[int] = None,
+        k_excerpts: Optional[int] = None,
+        memory_type: Optional[str] = None,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Retrieve facts, episode summaries and verbatim excerpts for ``query``."""
+        scope = self._scope(scope)
+        k_facts = self.max_facts if k_facts is None else k_facts
+        k_episodes = self.max_episodes if k_episodes is None else k_episodes
+        k_excerpts = self.max_excerpts if k_excerpts is None else k_excerpts
+        result: Dict[str, List[Dict[str, Any]]] = {"facts": [], "episodes": [], "excerpts": []}
+        if not query or not query.strip():
+            return result
+        qvec = self._encode(query)
+        uid = scope.user_id
+        if k_facts:
+            ranked = self.rank_facts(query, scope, k=k_facts, memory_type=memory_type, qvec=qvec)
+            facts = self.storage.hydrate_memories(
+                [i for i, _ in ranked], user_id=uid, include_shared=self.include_shared
+            )
+            score_of = dict(ranked)
+            for f in facts:
+                f["score"] = score_of.get(f["id"], 0.0)
+            if memory_type:
+                facts = [f for f in facts if f.get("type") == memory_type]
+            result["facts"] = self._rerank(query, facts)[:k_facts]
+        if k_episodes:
+            ids = self._rank_layer("episode", query, qvec, scope, k_episodes)
+            eps = self.storage.hydrate_episodes(ids, user_id=uid, include_shared=self.include_shared)
+            result["episodes"] = [e for e in eps if e.get("status") == "closed"][:k_episodes]
+        if k_excerpts:
+            ids = self._rank_layer("turn", query, qvec, scope, k_excerpts * 3)
+            turns = self.storage.hydrate_turns(ids, user_id=uid, include_shared=self.include_shared)
+            # The current session is already in the prompt; excerpts come from other sessions.
+            candidates = [
+                t
+                for t in turns
+                if (not scope.session_id or t.get("session_id") != scope.session_id)
+                and len(tokenize(t.get("content", ""))) >= 4
+            ]
+            # Demote turns a returned fact was extracted from (provenance): usually redundant,
+            # but kept as a fallback because a turn can hold more than its extracted facts.
+            covered = {tid for f in result["facts"] for tid in (f.get("source_turn_ids") or [])}
+            candidates.sort(key=lambda t: t["id"] in covered)
+            result["excerpts"] = candidates[:k_excerpts]
+        return result
+
+    async def profile(self, scope: Optional[Scope] = None, limit: int = 8) -> List[Dict[str, Any]]:
+        """Most important active facts for the user (stable "who is this user" block)."""
+        scope = self._scope(scope)
+        return await self.storage.get_memories(
+            limit=limit, scope_user=scope.user_id, include_shared=self.include_shared
+        )
 
     async def retrieve(
-        self, messages: List[Dict[str, Any]], limit: int = 10
+        self, messages: List[Dict[str, Any]], limit: int = 10, scope: Optional[Scope] = None
     ) -> List[Dict[str, Any]]:
-        """
-        Retrieve relevant memories for conversation.
-        
-        Args:
-            messages: Conversation messages
-            limit: Maximum number of memories to retrieve
-            
-        Returns:
-            List of relevant memories
-        """
-        # Extract query from last user message
+        """Facts relevant to the conversation's latest user message (compatibility API)."""
+        scope = self._scope(scope)
         query = self._extract_query(messages)
         if not query:
-            # If no query, return recent memories
-            return await self.storage.get_memories(limit=limit)
+            return await self.profile(scope, limit)
+        res = await self.recall(query, scope, k_facts=limit, k_episodes=0, k_excerpts=0)
+        facts = res["facts"]
+        if not facts and _is_generic(query):
+            facts = await self.profile(scope, limit)
+        return facts
 
-        # Retrieve using hybrid approach
-        semantic_results = []
-        keyword_results = []
-        graph_results = []
+    async def get_context(
+        self,
+        messages: Sequence[Any],
+        scope: Optional[Scope] = None,
+        session_summary: Optional[str] = None,
+        profile: Optional[int] = None,
+        query: Optional[str] = None,
+    ) -> str:
+        """
+        Formatted, budgeted memory block for the latest user message.
 
-        # 1. Semantic search (if embeddings available)
-        if self.embedding_model:
-            semantic_results = await self._semantic_search(query, limit=limit)
-
-        # 2. Keyword search
-        keyword_results = await self.storage.search_memories_text(
-            query, limit=limit
+        ``profile`` = number of always-on core facts (most important) to include for a
+        user-scoped call, in the spirit of Letta's core memory / Mem0's user profile.
+        Defaults to ``profile_facts``; ``True`` means 6.
+        """
+        scope = self._scope(scope)
+        query = query if query is not None else self._extract_query(messages)
+        n_profile = self.profile_facts if profile is None else (6 if profile is True else int(profile or 0))
+        prof = await self.profile(scope, limit=n_profile) if (n_profile and scope.user_id is not None) else []
+        if not query:
+            return self.context_builder.build(profile=prof)
+        res = await self.recall(query, scope)
+        facts = res["facts"]
+        if not facts and not prof and _is_generic(query):
+            prof = await self.profile(scope, limit=self.max_facts)
+        if facts:
+            self.storage.touch_memories([f["id"] for f in facts])
+        return self.context_builder.build(
+            facts=facts,
+            episodes=res["episodes"],
+            excerpts=res["excerpts"],
+            profile=prof,
+            session_summary=session_summary,
         )
-
-        # 3. Graph traversal (if graph enabled)
-        if self.graph:
-            graph_results = await self._graph_retrieve(query, limit=limit)
-
-        # Combine and rank results
-        combined = self._combine_and_rank(
-            semantic_results, keyword_results, graph_results, limit=limit
-        )
-
-        # If no results from specific search and query is generic (like "describe me"),
-        # fall back to returning recent/important memories
-        if not combined:
-            # Check if query is generic (short or common phrases)
-            generic_queries = ["describe me", "tell me about", "who am i", "what do you know"]
-            query_lower = query.lower().strip()
-            if len(query.split()) <= 3 or any(gen in query_lower for gen in generic_queries):
-                # Return recent/important memories for generic queries
-                logger.debug(f"Generic query '{query}' detected, returning recent memories")
-                all_memories = await self.storage.get_memories(limit=limit)
-                combined = all_memories
-
-        return combined
 
     async def search(
         self,
         query: str,
         limit: int = 10,
         memory_type: Optional[str] = None,
+        user_id: Optional[str] = None,
+        canonical_user_id: Optional[str] = None,
+        scope: Optional[Scope] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Search memories by query.
-        
-        Args:
-            query: Search query
-            limit: Maximum number of results
-            memory_type: Filter by memory type
-            
-        Returns:
-            List of matching memories
-        """
-        results = []
+        """Fact search. ``user_id`` (or ``scope``) selects the user; none = shared pool."""
+        if scope is None:
+            scope = Scope(
+                namespace=getattr(self.storage, "namespace", None),
+                user_id=canonical_user_id or user_id,
+            )
+        res = await self.recall(query, scope, k_facts=limit, k_episodes=0, k_excerpts=0, memory_type=memory_type)
+        return res["facts"]
 
-        # Semantic search
-        if self.embedding_model:
-            semantic = await self._semantic_search(query, limit=limit, memory_type=memory_type)
-            results.extend(semantic)
-
-        # Keyword search
-        keyword = await self.storage.search_memories_text(
-            query, limit=limit, memory_type=memory_type
-        )
-        results.extend(keyword)
-
-        # Deduplicate and rank
-        results = self._deduplicate_and_rank(results, limit=limit)
-
-        return results
-
-    def _extract_query(self, messages: List[Dict[str, Any]]) -> str:
-        """Extract search query from conversation messages."""
-        if not messages:
-            return ""
-
-        # Get last user message
-        for msg in reversed(messages):
-            if isinstance(msg, dict):
-                role = msg.get("role", "")
-                if role == "user":
-                    content = msg.get("content", "")
-                    if content:
-                        return content
-            elif isinstance(msg, str):
-                return msg
-
-        return ""
+    # ------------------------------------------------------------------ compatibility helpers
 
     async def _semantic_search(
-        self, query: str, limit: int = 10, memory_type: Optional[str] = None
+        self,
+        query: str,
+        limit: int = 10,
+        memory_type: Optional[str] = None,
+        user_id: Optional[str] = None,
+        canonical_user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Semantic search using vector embeddings.
-        
-        Args:
-            query: Search query
-            limit: Maximum results
-            memory_type: Filter by type
-            
-        Returns:
-            List of similar memories
-        """
-        if not self.embedding_model:
+        qvec = self._encode(query)
+        if qvec is None:
             return []
+        from memorable_ai.core.storage import ANY_USER
 
-        try:
-            # Generate query embedding
-            query_embedding = self.embedding_model.encode(query).tolist()
-
-            # Get all memories with embeddings
-            memories = await self.storage.get_memories(memory_type=memory_type, limit=1000)
-
-            # Calculate similarities
-            scored_memories = []
-            for memory in memories:
-                if memory.get("embedding"):
-                    memory_embedding = memory["embedding"]
-                    similarity = self._cosine_similarity(
-                        query_embedding, memory_embedding
-                    )
-                    scored_memories.append({
-                        **memory,
-                        "similarity": similarity,
-                    })
-
-            # Sort by similarity and return top results
-            scored_memories.sort(key=lambda x: x["similarity"], reverse=True)
-            return scored_memories[:limit]
-
-        except Exception as e:
-            logger.error(f"Semantic search failed: {e}")
-            return []
-
-    async def _graph_retrieve(
-        self, query: str, limit: int = 10
-    ) -> List[Dict[str, Any]]:
-        """
-        Graph-based retrieval using relationship traversal.
-        
-        Args:
-            query: Search query
-            limit: Maximum results
-            
-        Returns:
-            List of related memories from graph
-        """
-        if not self.graph:
-            return []
-
-        try:
-            # Use graph to find related entities
-            related = await self.graph.find_related(query, limit=limit)
-            return related
-        except Exception as e:
-            logger.error(f"Graph retrieval failed: {e}")
-            return []
+        uid = canonical_user_id or user_id or ANY_USER
+        hits = self.storage.vector_search("fact", qvec, k=limit * 2, user_id=uid)
+        mems = self.storage.hydrate_memories([i for i, _ in hits], user_id=uid)
+        sims = dict(hits)
+        out = [{**m, "similarity": sims.get(m["id"], 0.0)} for m in mems]
+        if memory_type:
+            out = [m for m in out if m.get("type") == memory_type]
+        return out[:limit]
 
     def _combine_and_rank(
         self,
@@ -234,76 +378,50 @@ class HybridRetriever:
         keyword_results: List[Dict[str, Any]],
         graph_results: List[Dict[str, Any]],
         limit: int = 10,
+        bm25_results: Optional[List[Dict[str, Any]]] = None,
+        entity_results: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Combine results from different retrieval methods and rank.
-        
-        Uses weighted scoring:
-        - Semantic similarity: 0.4
-        - Keyword match: 0.3
-        - Graph relevance: 0.3
-        """
-        # Create a map of memory ID to combined score
-        memory_scores: Dict[int, Dict[str, Any]] = {}
-
-        # Add semantic results
-        for i, mem in enumerate(semantic_results):
-            mem_id = mem.get("id", i)
-            if mem_id not in memory_scores:
-                memory_scores[mem_id] = {"memory": mem, "score": 0.0}
-            memory_scores[mem_id]["score"] += mem.get("similarity", 0.0) * 0.4
-
-        # Add keyword results
-        for i, mem in enumerate(keyword_results):
-            mem_id = mem.get("id", i)
-            if mem_id not in memory_scores:
-                memory_scores[mem_id] = {"memory": mem, "score": 0.0}
-            # Higher score for earlier results (better keyword match)
-            keyword_score = (len(keyword_results) - i) / len(keyword_results) if keyword_results else 0.0
-            memory_scores[mem_id]["score"] += keyword_score * 0.3
-
-        # Add graph results
-        for i, mem in enumerate(graph_results):
-            mem_id = mem.get("id", i)
-            if mem_id not in memory_scores:
-                memory_scores[mem_id] = {"memory": mem, "score": 0.0}
-            graph_score = (len(graph_results) - i) / len(graph_results) if graph_results else 0.0
-            memory_scores[mem_id]["score"] += graph_score * 0.3
-
-        # Sort by combined score
-        ranked = sorted(
-            memory_scores.values(), key=lambda x: x["score"], reverse=True
+        """RRF over pre-ranked result lists (compatibility)."""
+        by_id: Dict[Any, Dict[str, Any]] = {}
+        lists: Dict[str, List[Any]] = {}
+        for name, results in (
+            ("semantic", semantic_results),
+            ("lexical", (keyword_results or []) + (bm25_results or [])),
+            ("graph", (graph_results or []) + (entity_results or [])),
+        ):
+            ids = []
+            for m in results or []:
+                mid = m.get("id")
+                if mid is None:
+                    continue
+                by_id.setdefault(mid, m)
+                ids.append(mid)
+            lists[name] = ids
+        fused = reciprocal_rank_fusion(
+            lists,
+            {"semantic": self.semantic_weight, "lexical": self.bm25_weight, "graph": self.graph_weight},
+            k=self.rrf_k,
         )
+        return [by_id[i] for i, _ in fused[:limit]]
 
-        return [item["memory"] for item in ranked[:limit]]
-
-    def _deduplicate_and_rank(
-        self, results: List[Dict[str, Any]], limit: int = 10
-    ) -> List[Dict[str, Any]]:
-        """Remove duplicates and rank by relevance."""
-        seen = set()
-        unique = []
-
-        for result in results:
-            result_id = result.get("id")
-            if result_id and result_id not in seen:
-                seen.add(result_id)
-                unique.append(result)
-
+    def _deduplicate_and_rank(self, results: List[Dict[str, Any]], limit: int = 10) -> List[Dict[str, Any]]:
+        seen, unique = set(), []
+        for r in results:
+            rid = r.get("id")
+            if rid is not None and rid not in seen:
+                seen.add(rid)
+                unique.append(r)
         return unique[:limit]
 
-    def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
-        """Calculate cosine similarity between two vectors."""
-        try:
-            v1 = np.array(vec1)
-            v2 = np.array(vec2)
-            dot_product = np.dot(v1, v2)
-            norm1 = np.linalg.norm(v1)
-            norm2 = np.linalg.norm(v2)
-            if norm1 == 0 or norm2 == 0:
-                return 0.0
-            return float(dot_product / (norm1 * norm2))
-        except Exception as e:
-            logger.error(f"Cosine similarity calculation failed: {e}")
+    @staticmethod
+    def _cosine_similarity(vec1: Sequence[float], vec2: Sequence[float]) -> float:
+        v1, v2 = np.asarray(vec1, dtype=np.float32), np.asarray(vec2, dtype=np.float32)
+        n1, n2 = float(np.linalg.norm(v1)), float(np.linalg.norm(v2))
+        if n1 == 0 or n2 == 0 or v1.shape != v2.shape:
             return 0.0
+        return float(np.dot(v1, v2) / (n1 * n2))
 
+
+def _is_generic(query: str) -> bool:
+    q = query.lower().strip()
+    return len(tokenize(q)) <= 2 or any(g in q for g in _GENERIC)

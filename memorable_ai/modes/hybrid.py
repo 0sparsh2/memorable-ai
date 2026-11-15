@@ -1,70 +1,37 @@
 """
-Hybrid Mode
+Hybrid mode: per-session profile (conscious) + per-query retrieval (auto).
 
-Combines conscious and auto modes for best of both approaches.
-
-Inspired by Memori's combined mode.
-
-Reference: https://github.com/GibsonAI/Memori
+Inspired by Memori's combined mode (https://github.com/GibsonAI/Memori).
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from memorable_ai.modes.conscious import ConsciousMode
 from memorable_ai.modes.auto import AutoMode
+from memorable_ai.modes.conscious import ConsciousMode
 
 logger = logging.getLogger(__name__)
 
 
 class HybridMode:
-    """
-    Hybrid mode: Combines conscious and auto retrieval.
-    
-    Uses conscious mode for session-level context and
-    auto mode for query-specific context.
-    """
+    """Session-level profile plus query-specific context."""
 
     def __init__(self, retriever: Any):
-        """
-        Initialize hybrid mode.
-        
-        Args:
-            retriever: HybridRetriever instance
-        """
         self.conscious = ConsciousMode(retriever)
         self.auto = AutoMode(retriever)
 
     async def get_context(
-        self, session_id: str, messages: List[Dict[str, Any]]
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+        scope: Optional[Any] = None,
+        session_summary: Optional[str] = None,
     ) -> str:
-        """
-        Get context combining both modes.
-        
-        Args:
-            session_id: Session identifier
-            messages: Current conversation messages
-            
-        Returns:
-            Combined formatted context
-        """
-        # Get conscious (session-level) context
-        conscious_context = await self.conscious.get_context(session_id, messages)
-        
-        # Get auto (query-specific) context
-        auto_context = await self.auto.get_context(messages)
-        
-        # Combine
-        if conscious_context and auto_context:
+        conscious_context = await self.conscious.get_context(session_id, messages, scope=scope)
+        auto_context = await self.auto.get_context(messages, scope=scope, session_summary=session_summary)
+        if conscious_context and auto_context and conscious_context != auto_context:
             return f"{conscious_context}\n\n{auto_context}"
-        elif conscious_context:
-            return conscious_context
-        elif auto_context:
-            return auto_context
-        else:
-            return ""
+        return conscious_context or auto_context or ""
 
-    def clear_session(self, session_id: str):
-        """Clear cached memories for a session."""
-        self.conscious.clear_session(session_id)
-
+    def clear_session(self, session_id: str, scope: Optional[Any] = None):
+        self.conscious.clear_session(session_id, scope)

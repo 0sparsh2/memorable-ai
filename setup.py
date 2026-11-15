@@ -67,6 +67,10 @@ setup(
             "black>=23.0.0",
             "flake8>=6.0.0",
             "mypy>=1.0.0",
+            "matplotlib>=3.7.0",
+        ],
+        "research": [
+            "matplotlib>=3.7.0",
         ],
         "all": [
             "neo4j>=5.0.0",

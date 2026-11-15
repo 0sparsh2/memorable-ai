@@ -43,6 +43,9 @@ jobs:
         TEST_COUNT=$(pytest tests/ --collect-only -q 2>&1 | grep -E "test session starts|collected" | tail -1 || echo "0")
         echo "Test collection result: $TEST_COUNT"
         
+        # LOCOMO harness smoke (no API keys, no dataset download required for unit tests)
+        pytest tests/unit/test_locomo_loader.py tests/unit/test_locomo_smoke.py -q --no-cov
+        
         # Run tests with coverage, but don't fail on coverage requirement for now
         pytest tests/ -v --cov=memorable_ai --cov-report=xml --cov-report=term-missing --cov-fail-under=0 || true
         

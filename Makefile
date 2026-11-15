@@ -43,7 +43,23 @@ benchmark:
 	python -m pytest benchmarks/ -v
 
 benchmark-locomo:
-	python -m pytest benchmarks/locomo/ -v
+	pytest tests/unit/test_locomo_loader.py tests/unit/test_locomo_smoke.py -v --no-cov
+
+locomo-smoke:
+	python scripts/run_locomo_benchmark.py --mode smoke
+	pytest tests/unit/test_locomo_loader.py tests/unit/test_locomo_smoke.py -q --no-cov
+
+# Requires .env with NVIDIA_API_KEY or GEMINI_API_KEY; ~15–30 min for 10 questions
+locomo-subset:
+	python scripts/run_locomo_benchmark.py --mode full --conversations 1 --questions 10 \
+		--qa-timeout 300 --ingest-mode raw --context-format dated \
+		--save-rows --output benchmarks/locomo/data/measured_subset.json
+
+locomo-experiments:
+	LOCOMO_QA_LLM_TIMEOUT=300 LOCOMO_JUDGE_LLM_TIMEOUT=180 \
+	python scripts/run_locomo_experiments.py \
+		--experiments retrieval_only_dated,dated_context,extracted,oracle \
+		--questions 10 --conversations 1
 
 benchmark-multihop:
 	python -m pytest benchmarks/multihop/ -v

@@ -1,62 +1,33 @@
 """
-Auto Mode
+Auto mode: retrieve for every call, using the latest user message as the query.
 
-Dynamic per-query retrieval - retrieves relevant memories for each query.
-
-Inspired by Memori's auto_ingest mode.
-
-Reference: https://github.com/GibsonAI/Memori
+Inspired by Memori's auto_ingest mode (https://github.com/GibsonAI/Memori).
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
 class AutoMode:
-    """
-    Auto mode: Dynamic per-query retrieval.
-    
-    Retrieves relevant memories for each query dynamically.
-    """
+    """Per-query retrieval: facts, past episodes and excerpts relevant to this turn."""
 
     def __init__(self, retriever: Any):
-        """
-        Initialize auto mode.
-        
-        Args:
-            retriever: HybridRetriever instance
-        """
         self.retriever = retriever
 
-    async def get_context(self, messages: List[Dict[str, Any]]) -> str:
-        """
-        Get context for current query.
-        
-        Retrieves memories dynamically based on current conversation.
-        
-        Args:
-            messages: Current conversation messages
-            
-        Returns:
-            Formatted context string
-        """
-        # Retrieve memories for current query
-        memories = await self.retriever.retrieve(messages, limit=10)
-
-        return self._format_memories(memories)
+    async def get_context(
+        self,
+        messages: List[Dict[str, Any]],
+        scope: Optional[Any] = None,
+        session_summary: Optional[str] = None,
+    ) -> str:
+        return await self.retriever.get_context(messages, scope=scope, session_summary=session_summary)
 
     def _format_memories(self, memories: List[Dict[str, Any]]) -> str:
-        """Format memories for context injection."""
+        """Plain list format (compatibility)."""
         if not memories:
             return ""
-
-        formatted = ["Relevant memories:"]
-        for memory in memories:
-            content = memory.get("content", "")
-            memory_type = memory.get("type", "fact")
-            formatted.append(f"- [{memory_type}] {content}")
-
-        return "\n".join(formatted)
-
+        lines = ["Relevant memories:"]
+        lines += [f"- [{m.get('type', 'fact')}] {m.get('content', '')}" for m in memories]
+        return "\n".join(lines)

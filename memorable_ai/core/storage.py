@@ -1,402 +1,1142 @@
 """
-Storage Layer
+Storage layer.
 
-SQL-first architecture with optional graph support.
-Inspired by Memori's SQL flexibility and Supermemory's graph architecture.
+SQL-first: every memory layer lives in one SQL database (SQLite, Postgres, MySQL),
+defined in :mod:`memorable_ai.core.models`. This module owns:
 
-References:
-- Memori: https://github.com/GibsonAI/Memori (SQL storage)
-- Supermemory: https://github.com/supermemoryai/supermemory (graph architecture)
+- engine/session setup (WAL + busy timeout on SQLite, safe pooling across threads)
+- additive schema migration for databases created by older versions
+- scoped CRUD for semantic memories, with version chains instead of in-place edits
+- search primitives used by retrieval: vector search, lexical search (SQLite FTS5
+  or an in-process BM25 fallback), and order-preserving hydration with scope checks
 """
 
-import logging
-from datetime import datetime
-from typing import Any, Dict, List, Optional
-from memorable_ai.core.errors import StorageError
-from sqlalchemy import (
-    create_engine,
-    Column,
-    String,
-    Text,
-    DateTime,
-    Integer,
-    Float,
-    JSON,
-    Index,
-)
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.pool import StaticPool
+import hashlib
 import json
+import logging
+import re
+import threading
+from datetime import datetime
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from sqlalchemy import create_engine, event, inspect, or_, text
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from memorable_ai.core.errors import StorageError
+from memorable_ai.core.models import (  # noqa: F401  (re-exported for compatibility)
+    Base,
+    Conversation,
+    Entity,
+    Episode,
+    IdentityAlias,
+    Memory,
+    Mention,
+    Relation,
+    SessionRecord,
+    Turn,
+)
+from memorable_ai.core.vector_index import STOPWORDS, LexicalIndex, VectorIndex, light_stem
+
+from memorable_ai.core.models import utcnow  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-Base = declarative_base()
+
+class _AnyUser:
+    """Sentinel: do not filter by user (admin/listing APIs only)."""
+
+    def __repr__(self) -> str:
+        return "ANY_USER"
 
 
-class Memory(Base):
-    """Memory table schema."""
+ANY_USER: Any = _AnyUser()
+_UNSET: Any = object()
 
-    __tablename__ = "memories"
+KIND_MODELS = {"fact": Memory, "episode": Episode, "turn": Turn}
+# kind -> (fts table, id column)
+FTS_TABLES = {
+    "fact": ("memories_fts", "memory_id"),
+    "episode": ("episodes_fts", "ref_id"),
+    "turn": ("turns_fts", "ref_id"),
+}
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    content = Column(Text, nullable=False)
-    memory_type = Column(String(50), nullable=False, index=True)  # fact, preference, skill, rule, context
-    namespace = Column(String(255), index=True)  # For multi-tenant support
-    extra_metadata = Column(JSON)  # Additional metadata
-    embedding = Column(JSON)  # Vector embedding for semantic search
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    access_count = Column(Integer, default=0)
-    importance_score = Column(Float, default=0.0, index=True)
-
-    # Indexes for performance
-    __table_args__ = (
-        Index("idx_memory_type_namespace", "memory_type", "namespace"),
-        Index("idx_created_at", "created_at"),
-    )
+_WS_RE = re.compile(r"\s+")
+_PUNCT_TAIL_RE = re.compile(r"[\s\.\!\?,;:]+$")
 
 
-class Conversation(Base):
-    """Conversation history table."""
+def normalize_text(text_value: str) -> str:
+    t = _WS_RE.sub(" ", (text_value or "").strip().lower())
+    return _PUNCT_TAIL_RE.sub("", t)
 
-    __tablename__ = "conversations"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    namespace = Column(String(255), index=True)
-    messages = Column(JSON, nullable=False)  # Full conversation messages
-    response = Column(JSON)  # LLM response
-    extracted_memories = Column(JSON)  # Memories extracted from this conversation
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+def content_hash(text_value: str) -> str:
+    return hashlib.sha256(normalize_text(text_value).encode("utf-8")).hexdigest()
 
-    __table_args__ = (Index("idx_namespace_created", "namespace", "created_at"),)
+
+def episode_search_text(ep: Episode) -> str:
+    parts = [ep.title or "", ep.summary or ""]
+    if ep.key_points:
+        parts.extend(str(k) for k in ep.key_points)
+    return "\n".join(p for p in parts if p)
+
+
+def _iso(dt: Optional[datetime]) -> Optional[str]:
+    return dt.isoformat() if dt else None
 
 
 class Storage:
-    """
-    SQL-first storage layer for memories.
-    
-    Supports PostgreSQL, SQLite, MySQL with full-text search.
-    """
+    """SQL storage for all memory layers."""
 
     def __init__(self, connection_string: str, namespace: Optional[str] = None):
-        """
-        Initialize storage.
-        
-        Args:
-            connection_string: Database connection string
-            namespace: Optional namespace for multi-tenant support
-        """
         self.connection_string = connection_string
         self.namespace = namespace
+        self.is_sqlite = connection_string.startswith("sqlite")
+        path_part = connection_string.split("///", 1)[1] if "///" in connection_string else ""
+        self._in_memory = self.is_sqlite and (path_part in ("", ":memory:") or "mode=memory" in path_part)
 
-        # Create engine
-        if connection_string.startswith("sqlite"):
-            # SQLite needs special configuration
-            self.engine = create_engine(
-                connection_string,
-                connect_args={"check_same_thread": False},
-                poolclass=StaticPool,
-            )
+        if self.is_sqlite:
+            kwargs: Dict[str, Any] = {"connect_args": {"check_same_thread": False, "timeout": 30}}
+            if self._in_memory:
+                kwargs["poolclass"] = StaticPool
+            self.engine = create_engine(connection_string, **kwargs)
+            in_memory = self._in_memory
+
+            @event.listens_for(self.engine, "connect")
+            def _sqlite_pragmas(dbapi_conn, _record):  # pragma: no cover - trivial
+                cur = dbapi_conn.cursor()
+                try:
+                    if not in_memory:
+                        cur.execute("PRAGMA journal_mode=WAL")
+                    cur.execute("PRAGMA busy_timeout=30000")
+                    cur.execute("PRAGMA synchronous=NORMAL")
+                finally:
+                    cur.close()
         else:
             self.engine = create_engine(connection_string, pool_pre_ping=True)
 
-        # Create session factory
-        self.SessionLocal = sessionmaker(bind=self.engine)
+        self.SessionLocal = sessionmaker(bind=self.engine, expire_on_commit=False)
+        self._fts_enabled = False
+        self._fts_kinds: Dict[str, bool] = {}
+        self._sync_lock = threading.RLock()
+        self._reset_indexes()
 
-        # Create tables
         Base.metadata.create_all(self.engine)
+        self._migrate_schema()
+        logger.info("Storage initialized: %s", self._redacted_url())
 
-        logger.info(f"Storage initialized: {connection_string}")
+    def _reset_indexes(self, kind: Optional[str] = None) -> None:
+        kinds = [kind] if kind else list(KIND_MODELS)
+        if not hasattr(self, "_vec"):
+            self._vec: Dict[str, VectorIndex] = {}
+            self._lex: Dict[str, LexicalIndex] = {}
+            self._vec_watermark: Dict[str, int] = {}
+            self._lex_watermark: Dict[str, int] = {}
+        for k in kinds:
+            self._vec[k] = VectorIndex()
+            self._lex[k] = LexicalIndex()
+            self._vec_watermark[k] = 0
+            self._lex_watermark[k] = 0
+
+    def _redacted_url(self) -> str:
+        return re.sub(r"//([^:/@]+):([^@]+)@", r"//\1:***@", self.connection_string)
+
+    @property
+    def in_memory(self) -> bool:
+        return self._in_memory
+
+    # ------------------------------------------------------------------ schema
+
+    def _migrate_schema(self) -> None:
+        """Additive migration for databases created by earlier versions."""
+        insp = inspect(self.engine)
+        tables = set(insp.get_table_names())
+        added_user_col = False
+        json_type = "TEXT" if self.is_sqlite else "JSON"
+        with self.engine.connect() as conn:
+            if "memories" in tables:
+                existing = {c["name"] for c in insp.get_columns("memories")}
+                for col, col_type in [
+                    ("valid_from", "TIMESTAMP"),
+                    ("valid_to", "TIMESTAMP"),
+                    ("invalidated_at", "TIMESTAMP"),
+                    ("superseded_by_id", "INTEGER"),
+                    ("supersedes_id", "INTEGER"),
+                    ("confidence", "FLOAT DEFAULT 1.0"),
+                    ("session_id", "VARCHAR(255)"),
+                    ("user_id", "VARCHAR(255)"),
+                    ("content_hash", "VARCHAR(64)"),
+                    ("last_accessed_at", "TIMESTAMP"),
+                    ("source", "VARCHAR(32)"),
+                    ("source_episode_id", "INTEGER"),
+                    ("source_turn_ids", json_type),
+                ]:
+                    if col not in existing:
+                        try:
+                            conn.execute(text(f"ALTER TABLE memories ADD COLUMN {col} {col_type}"))
+                            conn.commit()
+                            if col == "user_id":
+                                added_user_col = True
+                        except Exception as e:
+                            conn.rollback()
+                            logger.debug("Migration skip memories.%s: %s", col, e)
+            if "conversations" in tables:
+                conv_cols = {c["name"] for c in insp.get_columns("conversations")}
+                for col, col_type in [
+                    ("summary", "TEXT"),
+                    ("session_id", "VARCHAR(255)"),
+                    ("user_id", "VARCHAR(255)"),
+                ]:
+                    if col not in conv_cols:
+                        try:
+                            conn.execute(text(f"ALTER TABLE conversations ADD COLUMN {col} {col_type}"))
+                            conn.commit()
+                        except Exception as e:
+                            conn.rollback()
+                            logger.debug("Migration skip conversations.%s: %s", col, e)
+            for stmt in (
+                "CREATE INDEX IF NOT EXISTS idx_memory_scope ON memories (namespace, user_id, invalidated_at)",
+                "CREATE INDEX IF NOT EXISTS ix_memories_content_hash ON memories (content_hash)",
+            ):
+                try:
+                    conn.execute(text(stmt))
+                    conn.commit()
+                except Exception as e:  # MySQL has no IF NOT EXISTS for indexes
+                    conn.rollback()
+                    logger.debug("Index skip: %s", e)
+        self._backfill(added_user_col)
+        self._ensure_fts()
+
+    def _backfill(self, added_user_col: bool) -> None:
+        """Fill user_id/content_hash on legacy rows (portable Python loop, runs once)."""
+        session = self.get_session()
+        try:
+            rows = session.query(Memory).filter(Memory.content_hash.is_(None)).limit(200000).all()
+            for m in rows:
+                m.content_hash = content_hash(m.content)
+                if added_user_col and m.user_id is None and isinstance(m.extra_metadata, dict):
+                    m.user_id = m.extra_metadata.get("canonical_user_id")
+            if rows:
+                session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.debug("Backfill skipped: %s", e)
+        finally:
+            session.close()
+
+    def _ensure_fts(self) -> None:
+        """SQLite FTS5 tables per kind (BM25 ranking). Other databases use LexicalIndex."""
+        if not self.is_sqlite:
+            return
+        try:
+            with self.engine.connect() as conn:
+                for kind, (fts, idcol) in FTS_TABLES.items():
+                    conn.execute(
+                        text(
+                            f"CREATE VIRTUAL TABLE IF NOT EXISTS {fts} USING fts5("
+                            f"content, {idcol} UNINDEXED, tokenize='porter unicode61')"
+                        )
+                    )
+                    conn.commit()
+                    self._fts_kinds[kind] = True
+                count = conn.execute(text("SELECT COUNT(*) FROM memories_fts")).scalar()
+                if count == 0:
+                    conn.execute(
+                        text(
+                            "INSERT INTO memories_fts(memory_id, content) "
+                            "SELECT id, content FROM memories WHERE invalidated_at IS NULL"
+                        )
+                    )
+                    conn.commit()
+            self._fts_enabled = True
+        except Exception as e:
+            logger.debug("FTS5 not available, using in-process BM25: %s", e)
+            self._fts_enabled = False
+            self._fts_kinds = {}
+
+    @staticmethod
+    def _fts_match_query(query: str) -> str:
+        """Build a safe FTS5 MATCH string (quoted OR of content words)."""
+        words = re.findall(r"\w+", query)
+        terms = [t for t in words if len(t) > 1 and t.lower() not in STOPWORDS]
+        if not terms:
+            terms = [t for t in words if len(t) > 2]
+        if not terms:
+            safe = query.replace('"', '""').strip()
+            return f'"{safe}"' if safe else '""'
+        clauses = []
+        for t in terms[:16]:
+            clauses.append('"' + t.replace('"', '""') + '"')
+            # Prefix on the light stem catches morphology Porter splits (allergies/allergic).
+            stem = light_stem(t)
+            if len(stem) >= 4 and stem.isalnum() and stem != t.lower():
+                clauses.append(f"{stem}*")
+        return " OR ".join(clauses)
 
     def get_session(self) -> Session:
-        """Get database session."""
         return self.SessionLocal()
 
-    async def store_memories(self, memories: List[Dict[str, Any]]):
-        """
-        Store memories in database.
-        
-        Checks for duplicates before storing to avoid storing the same memory multiple times.
-        
-        Args:
-            memories: List of memory dictionaries
-        """
-        if not memories:
-            return
-            
-        session = self.get_session()
-        try:
-            stored_count = 0
-            skipped_count = 0
-            
-            for memory_data in memories:
-                content = memory_data.get("content", "").strip()
-                if not content:
-                    continue
-                    
-                memory_type = memory_data.get("type", "fact")
-                namespace = self.namespace or memory_data.get("namespace")
-                
-                # Check if a similar memory already exists
-                # Check for exact match first (case-insensitive)
-                existing = (
-                    session.query(Memory)
-                    .filter(Memory.content.ilike(content))
-                    .filter(Memory.memory_type == memory_type)
-                    .filter(Memory.namespace == namespace if namespace else Memory.namespace.is_(None))
-                    .first()
-                )
-                
-                if existing:
-                    # Memory already exists, skip or update
-                    logger.debug(f"Memory already exists (skipping): {content[:50]}...")
-                    skipped_count += 1
-                    # Update timestamp and access count to show it was referenced again
-                    existing.updated_at = datetime.utcnow()
-                    existing.access_count = (existing.access_count or 0) + 1
-                    continue
-                
-                # Check for similar content (fuzzy match for near-duplicates)
-                # Get all memories with same type and namespace to check for similar content
-                all_similar = (
-                    session.query(Memory)
-                    .filter(Memory.memory_type == memory_type)
-                    .filter(Memory.namespace == namespace if namespace else Memory.namespace.is_(None))
-                    .all()
-                )
-                
-                # Check if any existing memory has very similar content (>90% similarity)
-                content_lower = content.lower()
-                is_duplicate = False
-                for existing_mem in all_similar:
-                    existing_content_lower = existing_mem.content.lower()
-                    # Simple similarity check: if one contains the other or vice versa
-                    if (content_lower in existing_content_lower and len(content_lower) < len(existing_content_lower)) or \
-                       (existing_content_lower in content_lower and len(existing_content_lower) < len(content_lower)):
-                        # Check word overlap for better similarity
-                        content_words = set(content_lower.split())
-                        existing_words = set(existing_content_lower.split())
-                        if content_words and existing_words:
-                            overlap = len(content_words.intersection(existing_words))
-                            total_unique = len(content_words.union(existing_words))
-                            similarity = overlap / total_unique if total_unique > 0 else 0
-                            if similarity > 0.8:  # 80% word overlap
-                                logger.debug(f"Similar memory already exists (skipping): {content[:50]}... (similarity: {similarity:.2f})")
-                                skipped_count += 1
-                                is_duplicate = True
-                                # Update existing memory
-                                existing_mem.updated_at = datetime.utcnow()
-                                existing_mem.access_count = (existing_mem.access_count or 0) + 1
-                                break
-                
-                if is_duplicate:
-                    continue
-                
-                # Store new memory
-                memory = Memory(
-                    content=content,
-                    memory_type=memory_type,
-                    namespace=namespace,
-                    extra_metadata=memory_data.get("metadata", {}),
-                    embedding=memory_data.get("embedding"),
-                    importance_score=memory_data.get("importance_score", 0.0),
-                )
-                session.add(memory)
-                stored_count += 1
+    # ------------------------------------------------------------------ scope
 
-            session.commit()
-            logger.debug(f"Stored {stored_count} new memories, skipped {skipped_count} duplicates")
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Failed to store memories: {e}")
-            raise StorageError(f"Failed to store memories: {e}") from e
-        finally:
-            session.close()
+    def _ns_filter(self, query, model):
+        if self.namespace:
+            return query.filter(model.namespace == self.namespace)
+        return query
 
-    async def store_conversation(
-        self,
-        messages: List[Dict[str, Any]],
-        response: Optional[Dict[str, Any]] = None,
-        extracted_memories: Optional[List[Dict[str, Any]]] = None,
-    ):
-        """
-        Store conversation history.
-        
-        Args:
-            messages: Conversation messages
-            response: LLM response
-            extracted_memories: Memories extracted from conversation
-        """
-        session = self.get_session()
-        try:
-            conversation = Conversation(
-                namespace=self.namespace,
-                messages=messages,
-                response=response,
-                extracted_memories=extracted_memories,
+    @staticmethod
+    def _user_filter(query, model, user_id: Any, include_shared: bool = False):
+        if user_id is ANY_USER:
+            return query
+        if user_id is None:
+            return query.filter(model.user_id.is_(None))
+        if include_shared:
+            return query.filter(or_(model.user_id == user_id, model.user_id.is_(None)))
+        return query.filter(model.user_id == user_id)
+
+    def _user_scope_clause(self, canonical_user_id: Optional[str], session_id: Optional[str] = None):
+        """Portable user filter (kept for API compatibility)."""
+        if not canonical_user_id:
+            return None
+        clauses = [Memory.user_id == canonical_user_id]
+        if session_id and session_id != canonical_user_id:
+            clauses.append(Memory.user_id == session_id)
+        return or_(*clauses)
+
+    @staticmethod
+    def _resolve_user_arg(user_id: Optional[str], canonical_user_id: Optional[str]) -> Any:
+        """Legacy listing APIs: no user given -> no user filter."""
+        uid = canonical_user_id or user_id
+        return uid if uid else ANY_USER
+
+    # ------------------------------------------------------------------ FTS / index sync
+
+    def fts_insert(self, session: Session, kind: str, ref_id: int, content: str) -> None:
+        if self._fts_kinds.get(kind) and content:
+            fts, idcol = FTS_TABLES[kind]
+            session.execute(
+                text(f"INSERT INTO {fts}({idcol}, content) VALUES (:rid, :c)"),
+                {"rid": ref_id, "c": content},
             )
-            session.add(conversation)
-            session.commit()
-            logger.debug("Stored conversation")
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Failed to store conversation: {e}")
-            raise
+
+    def fts_delete(self, session: Session, kind: str, ref_id: int) -> None:
+        if self._fts_kinds.get(kind):
+            fts, idcol = FTS_TABLES[kind]
+            session.execute(text(f"DELETE FROM {fts} WHERE {idcol} = :rid"), {"rid": ref_id})
+
+    def index_add(
+        self,
+        kind: str,
+        ref_id: int,
+        user_id: Optional[str],
+        content: str,
+        embedding: Optional[Sequence[float]] = None,
+    ) -> None:
+        """Add a committed row to the in-process indexes (if they are loaded)."""
+        if embedding is not None and self._vec[kind].loaded:
+            self._vec[kind].add(ref_id, user_id, embedding)
+        if not self._fts_kinds.get(kind) and self._lex[kind].loaded:
+            self._lex[kind].add(ref_id, user_id, content)
+
+    def index_remove(self, kind: str, ref_id: int) -> None:
+        self._vec[kind].remove(ref_id)
+        self._lex[kind].remove(ref_id)
+
+    @staticmethod
+    def _valid_filter(query, model):
+        if model is Memory:
+            return query.filter(Memory.invalidated_at.is_(None))
+        if model is Episode:
+            return query.filter(Episode.status == "closed")
+        return query
+
+    def _sync_vector(self, kind: str) -> VectorIndex:
+        """Load rows the vector index has not seen yet (``id > watermark``)."""
+        model = KIND_MODELS[kind]
+        with self._sync_lock:
+            index = self._vec[kind]
+            session = self.get_session()
+            try:
+                q = session.query(model.id, model.user_id, model.embedding).filter(
+                    model.id > self._vec_watermark[kind], model.embedding.isnot(None)
+                )
+                q = self._valid_filter(self._ns_filter(q, model), model)
+                max_seen = self._vec_watermark[kind]
+                for rid, uid, emb in q.order_by(model.id).all():
+                    if isinstance(emb, str):
+                        try:
+                            emb = json.loads(emb)
+                        except Exception:
+                            emb = None
+                    if emb:
+                        index.add(rid, uid, emb)
+                    max_seen = max(max_seen, rid)
+                self._vec_watermark[kind] = max_seen
+                index.loaded = True
+            finally:
+                session.close()
+            return index
+
+    def _sync_lexical(self, kind: str) -> LexicalIndex:
+        model = KIND_MODELS[kind]
+        with self._sync_lock:
+            index = self._lex[kind]
+            session = self.get_session()
+            try:
+                q = session.query(model).filter(model.id > self._lex_watermark[kind])
+                q = self._valid_filter(self._ns_filter(q, model), model)
+                max_seen = self._lex_watermark[kind]
+                for row in q.order_by(model.id).all():
+                    body = episode_search_text(row) if kind == "episode" else row.content
+                    index.add(row.id, row.user_id, body)
+                    max_seen = max(max_seen, row.id)
+                self._lex_watermark[kind] = max_seen
+                index.loaded = True
+            finally:
+                session.close()
+            return index
+
+    # ------------------------------------------------------------------ search primitives
+
+    def vector_search(
+        self,
+        kind: str,
+        query_vec: Sequence[float],
+        k: int = 20,
+        user_id: Any = None,
+        include_shared: bool = False,
+    ) -> List[Tuple[int, float]]:
+        index = self._sync_vector(kind)
+        if user_id is ANY_USER:
+            return index.search(query_vec, k)
+        return index.search(query_vec, k, user_id=user_id, include_shared=include_shared)
+
+    def lexical_search(
+        self,
+        kind: str,
+        query: str,
+        k: int = 20,
+        user_id: Any = None,
+        include_shared: bool = False,
+        memory_type: Optional[str] = None,
+    ) -> List[Tuple[int, float]]:
+        """BM25 search. Higher score = better."""
+        if not query or not query.strip():
+            return []
+        if self._fts_kinds.get(kind):
+            fts, idcol = FTS_TABLES[kind]
+            table = KIND_MODELS[kind].__tablename__
+            sql = (
+                f"SELECT f.{idcol} AS rid, bm25({fts}) AS s FROM {fts} f "
+                f"JOIN {table} t ON t.id = f.{idcol} WHERE {fts} MATCH :q"
+            )
+            params: Dict[str, Any] = {"q": self._fts_match_query(query), "lim": k}
+            if kind == "fact":
+                sql += " AND t.invalidated_at IS NULL"
+                if memory_type:
+                    sql += " AND t.memory_type = :mt"
+                    params["mt"] = memory_type
+            elif kind == "episode":
+                sql += " AND t.status = 'closed'"
+            if self.namespace:
+                sql += " AND t.namespace = :ns"
+                params["ns"] = self.namespace
+            if user_id is not ANY_USER:
+                if user_id is None:
+                    sql += " AND t.user_id IS NULL"
+                elif include_shared:
+                    sql += " AND (t.user_id = :uid OR t.user_id IS NULL)"
+                    params["uid"] = user_id
+                else:
+                    sql += " AND t.user_id = :uid"
+                    params["uid"] = user_id
+            sql += " ORDER BY s LIMIT :lim"
+            session = self.get_session()
+            try:
+                rows = session.execute(text(sql), params).fetchall()
+                return [(int(r[0]), float(-r[1])) for r in rows]
+            except Exception as e:
+                logger.debug("FTS search failed (%s); using in-process BM25", e)
+            finally:
+                session.close()
+        index = self._sync_lexical(kind)
+        if user_id is ANY_USER:
+            hits = index.search(query, k * 2)
+        else:
+            hits = index.search(query, k * 2, user_id=user_id, include_shared=include_shared)
+        if kind == "fact" and hits:
+            valid = {
+                m["id"]: m["type"] for m in self.hydrate_memories([h[0] for h in hits], user_id=ANY_USER)
+            }
+            hits = [h for h in hits if h[0] in valid and (not memory_type or valid[h[0]] == memory_type)]
+        return hits[:k]
+
+    def hydrate_memories(
+        self,
+        ids: Iterable[int],
+        user_id: Any = ANY_USER,
+        include_shared: bool = False,
+        include_invalid: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Load memories by id, preserving order and enforcing scope/validity."""
+        ids = [int(i) for i in ids]
+        if not ids:
+            return []
+        session = self.get_session()
+        try:
+            q = session.query(Memory).filter(Memory.id.in_(ids))
+            if not include_invalid:
+                q = q.filter(Memory.invalidated_at.is_(None))
+            q = self._user_filter(self._ns_filter(q, Memory), Memory, user_id, include_shared)
+            by_id = {m.id: m for m in q.all()}
+            return [self._memory_to_dict(by_id[i]) for i in ids if i in by_id]
         finally:
             session.close()
+
+    def hydrate_episodes(
+        self, ids: Iterable[int], user_id: Any = ANY_USER, include_shared: bool = False
+    ) -> List[Dict[str, Any]]:
+        ids = [int(i) for i in ids]
+        if not ids:
+            return []
+        session = self.get_session()
+        try:
+            q = session.query(Episode).filter(Episode.id.in_(ids))
+            q = self._user_filter(self._ns_filter(q, Episode), Episode, user_id, include_shared)
+            by_id = {e.id: e for e in q.all()}
+            return [self.episode_to_dict(by_id[i]) for i in ids if i in by_id]
+        finally:
+            session.close()
+
+    def hydrate_turns(
+        self, ids: Iterable[int], user_id: Any = ANY_USER, include_shared: bool = False
+    ) -> List[Dict[str, Any]]:
+        ids = [int(i) for i in ids]
+        if not ids:
+            return []
+        session = self.get_session()
+        try:
+            q = session.query(Turn).filter(Turn.id.in_(ids))
+            q = self._user_filter(self._ns_filter(q, Turn), Turn, user_id, include_shared)
+            by_id = {t.id: t for t in q.all()}
+            return [self.turn_to_dict(by_id[i]) for i in ids if i in by_id]
+        finally:
+            session.close()
+
+    # ------------------------------------------------------------------ memories (write)
+
+    def insert_memory(self, data: Dict[str, Any], dedup: bool = True) -> Tuple[int, str]:
+        """
+        Insert one semantic memory. Returns ``(id, op)`` with op ``"add"`` or
+        ``"duplicate"`` (same normalised content, type and scope already active).
+        """
+        content = (data.get("content") or "").strip()
+        if not content:
+            raise StorageError("Memory content is empty")
+        memory_type = data.get("type") or data.get("memory_type") or "fact"
+        namespace = self.namespace or data.get("namespace")
+        meta = dict(data.get("metadata") or {})
+        user_id = data.get("user_id")
+        if user_id is None:
+            user_id = meta.get("canonical_user_id")
+        session_id = data.get("session_id") or meta.get("session_id")
+        chash = content_hash(content)
+        now = utcnow()
+
+        session = self.get_session()
+        try:
+            if dedup:
+                q = session.query(Memory).filter(
+                    Memory.content_hash == chash,
+                    Memory.memory_type == memory_type,
+                    Memory.invalidated_at.is_(None),
+                )
+                q = q.filter(Memory.namespace == namespace if namespace else Memory.namespace.is_(None))
+                q = self._user_filter(q, Memory, user_id)
+                existing = q.first()
+                if existing:
+                    existing.updated_at = now
+                    existing.access_count = (existing.access_count or 0) + 1
+                    session.commit()
+                    return existing.id, "duplicate"
+
+            embedding = data.get("embedding")
+            if embedding is not None and hasattr(embedding, "tolist"):
+                embedding = embedding.tolist()
+            memory = Memory(
+                content=content,
+                memory_type=memory_type,
+                namespace=namespace,
+                user_id=user_id,
+                session_id=session_id or user_id,
+                extra_metadata=meta,
+                embedding=embedding,
+                content_hash=chash,
+                importance_score=float(data.get("importance_score") or 0.0),
+                valid_from=data.get("valid_from") or now,
+                valid_to=data.get("valid_to"),
+                confidence=float(data.get("confidence", 1.0)),
+                source=data.get("source") or meta.get("source"),
+                source_episode_id=data.get("source_episode_id"),
+                source_turn_ids=data.get("source_turn_ids"),
+                supersedes_id=data.get("supersedes_id"),
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(memory)
+            session.flush()
+            self.fts_insert(session, "fact", memory.id, content)
+            session.commit()
+            self.index_add("fact", memory.id, user_id, content, embedding)
+            return memory.id, "add"
+        except Exception as e:
+            session.rollback()
+            raise StorageError(f"Failed to store memory: {e}") from e
+        finally:
+            session.close()
+
+    async def store_memories(self, memories: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Store memories (exact duplicates are merged). Returns them with ``id``/``op``."""
+        stored: List[Dict[str, Any]] = []
+        for memory_data in memories or []:
+            if not (memory_data.get("content") or "").strip():
+                continue
+            mid, op = self.insert_memory(memory_data)
+            stored.append({**memory_data, "id": mid, "op": op})
+        return stored
+
+    def supersede_memory(self, old_id: int, new_data: Dict[str, Any]) -> Optional[int]:
+        """
+        Versioned update: insert the new statement and invalidate the old one.
+        The old row is kept (``superseded_by_id`` -> new row) so history survives.
+        """
+        session = self.get_session()
+        try:
+            old = session.query(Memory).filter(Memory.id == old_id).first()
+            if old is None:
+                return None
+            data = dict(new_data)
+            data.setdefault("type", old.memory_type)
+            data.setdefault("user_id", old.user_id)
+            data.setdefault("session_id", old.session_id)
+            meta = dict(old.extra_metadata or {})
+            meta.pop("invalidation_reason", None)
+            meta.update(data.get("metadata") or {})
+            data["metadata"] = meta
+            data["supersedes_id"] = old_id
+            data.setdefault("importance_score", old.importance_score or 0.0)
+        finally:
+            session.close()
+        new_id, _ = self.insert_memory(data, dedup=False)
+        self._invalidate(old_id, superseded_by_id=new_id, reason="superseded")
+        return new_id
+
+    def _invalidate(
+        self, memory_id: int, superseded_by_id: Optional[int] = None, reason: Optional[str] = None
+    ) -> bool:
+        session = self.get_session()
+        try:
+            memory = session.query(Memory).filter(Memory.id == memory_id).first()
+            if memory is None or memory.invalidated_at is not None:
+                return False
+            now = utcnow()
+            memory.invalidated_at = now
+            memory.valid_to = memory.valid_to or now
+            if superseded_by_id:
+                memory.superseded_by_id = superseded_by_id
+            if reason:
+                meta = dict(memory.extra_metadata or {})
+                meta["invalidation_reason"] = reason
+                memory.extra_metadata = meta
+            self.fts_delete(session, "fact", memory_id)
+            session.commit()
+            self.index_remove("fact", memory_id)
+            return True
+        except Exception as e:
+            session.rollback()
+            logger.error("Failed to invalidate memory %s: %s", memory_id, e)
+            return False
+        finally:
+            session.close()
+
+    async def invalidate_memory(
+        self, memory_id: int, superseded_by_id: Optional[int] = None, reason: Optional[str] = None
+    ) -> bool:
+        """Soft delete: the memory stops being retrieved but stays in history."""
+        return self._invalidate(memory_id, superseded_by_id=superseded_by_id, reason=reason)
+
+    async def update_memory_content(
+        self,
+        memory_id: int,
+        content: str,
+        invalidate_superseded: bool = True,
+        embedding: Optional[Sequence[float]] = None,
+    ) -> Optional[int]:
+        """
+        Change a memory's content. By default this creates a new version and
+        invalidates the old row; returns the id of the row now holding ``content``.
+        With ``invalidate_superseded=False`` the row is edited in place, and FTS
+        and the embedding are kept in sync.
+        """
+        if invalidate_superseded:
+            data: Dict[str, Any] = {"content": content}
+            if embedding is not None:
+                data["embedding"] = list(embedding)
+            return self.supersede_memory(memory_id, data)
+        session = self.get_session()
+        try:
+            memory = session.query(Memory).filter(Memory.id == memory_id).first()
+            if memory is None:
+                return None
+            memory.content = content
+            memory.content_hash = content_hash(content)
+            memory.updated_at = utcnow()
+            memory.embedding = list(embedding) if embedding is not None else None
+            self.fts_delete(session, "fact", memory_id)
+            self.fts_insert(session, "fact", memory_id, content)
+            session.commit()
+            # Indexes skip ids they already hold, so rebuild the fact indexes lazily.
+            with self._sync_lock:
+                self._reset_indexes("fact")
+            return memory_id
+        except Exception as e:
+            session.rollback()
+            logger.error("Failed to update memory: %s", e)
+            return None
+        finally:
+            session.close()
+
+    async def delete_memory(self, memory_id: int, hard: bool = True) -> bool:
+        """
+        Delete a memory. ``hard=True`` (default) physically removes the row and its
+        graph links (right to be forgotten); ``hard=False`` only invalidates it.
+        """
+        if not hard:
+            return self._invalidate(memory_id, reason="deleted")
+        session = self.get_session()
+        try:
+            memory = session.query(Memory).filter(Memory.id == memory_id).first()
+            if memory is None:
+                return False
+            self.fts_delete(session, "fact", memory_id)
+            session.query(Mention).filter(Mention.memory_id == memory_id).delete()
+            session.query(Relation).filter(Relation.memory_id == memory_id).delete()
+            session.delete(memory)
+            session.commit()
+            self.index_remove("fact", memory_id)
+            return True
+        except Exception as e:
+            session.rollback()
+            logger.error("Failed to delete memory: %s", e)
+            return False
+        finally:
+            session.close()
+
+    async def update_memory_importance(self, memory_id: int, importance_score: float) -> None:
+        session = self.get_session()
+        try:
+            memory = session.query(Memory).filter(Memory.id == memory_id).first()
+            if memory:
+                memory.importance_score = importance_score
+                session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error("Failed to update memory importance: %s", e)
+        finally:
+            session.close()
+
+    def touch_memories(self, ids: Iterable[int]) -> None:
+        """Record retrieval: bump access_count and last_accessed_at."""
+        ids = [int(i) for i in ids]
+        if not ids:
+            return
+        session = self.get_session()
+        try:
+            now = utcnow()
+            for m in session.query(Memory).filter(Memory.id.in_(ids)).all():
+                m.access_count = (m.access_count or 0) + 1
+                m.last_accessed_at = now
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.debug("touch_memories failed: %s", e)
+        finally:
+            session.close()
+
+    def memory_history(self, memory_id: int) -> List[Dict[str, Any]]:
+        """Full version chain containing ``memory_id``, oldest first."""
+        session = self.get_session()
+        try:
+            node = session.query(Memory).filter(Memory.id == memory_id).first()
+            if node is None:
+                return []
+            seen = {node.id}
+            while node.supersedes_id and node.supersedes_id not in seen:
+                prev = session.query(Memory).filter(Memory.id == node.supersedes_id).first()
+                if prev is None:
+                    break
+                seen.add(prev.id)
+                node = prev
+            chain = [node]
+            seen = {node.id}
+            while node.superseded_by_id and node.superseded_by_id not in seen:
+                nxt = session.query(Memory).filter(Memory.id == node.superseded_by_id).first()
+                if nxt is None:
+                    break
+                chain.append(nxt)
+                seen.add(nxt.id)
+                node = nxt
+            return [self._memory_to_dict(m) for m in chain]
+        finally:
+            session.close()
+
+    def forget_user(self, user_id: str) -> Dict[str, int]:
+        """Hard-delete every row belonging to ``user_id`` in this namespace."""
+        if not user_id:
+            raise ValueError("user_id is required")
+        counts: Dict[str, int] = {}
+        session = self.get_session()
+        try:
+
+            def _ids(model) -> List[int]:
+                q = self._ns_filter(session.query(model.id), model).filter(model.user_id == user_id)
+                return [r[0] for r in q.all()]
+
+            mem_ids, ep_ids, turn_ids, ent_ids = _ids(Memory), _ids(Episode), _ids(Turn), _ids(Entity)
+            for kind, ids in (("fact", mem_ids), ("episode", ep_ids), ("turn", turn_ids)):
+                for rid in ids:
+                    self.fts_delete(session, kind, rid)
+            if ent_ids:
+                session.query(Mention).filter(Mention.entity_id.in_(ent_ids)).delete(
+                    synchronize_session=False
+                )
+            counts["relations"] = (
+                self._ns_filter(session.query(Relation), Relation)
+                .filter(Relation.user_id == user_id)
+                .delete(synchronize_session=False)
+            )
+            for name, model, ids in (
+                ("entities", Entity, ent_ids),
+                ("memories", Memory, mem_ids),
+                ("episodes", Episode, ep_ids),
+                ("turns", Turn, turn_ids),
+            ):
+                counts[name] = len(ids)
+                if ids:
+                    session.query(model).filter(model.id.in_(ids)).delete(synchronize_session=False)
+            counts["sessions"] = (
+                self._ns_filter(session.query(SessionRecord), SessionRecord)
+                .filter(SessionRecord.user_id == user_id)
+                .delete(synchronize_session=False)
+            )
+            session.query(Conversation).filter(Conversation.user_id == user_id).delete(
+                synchronize_session=False
+            )
+            session.commit()
+            for kind, ids in (("fact", mem_ids), ("episode", ep_ids), ("turn", turn_ids)):
+                for rid in ids:
+                    self.index_remove(kind, rid)
+            return counts
+        except Exception as e:
+            session.rollback()
+            raise StorageError(f"forget_user failed: {e}") from e
+        finally:
+            session.close()
+
+    # ------------------------------------------------------------------ memories (read)
 
     async def get_memories(
         self,
         memory_type: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        user_id: Optional[str] = None,
+        canonical_user_id: Optional[str] = None,
+        include_invalid: bool = False,
+        scope_user: Any = _UNSET,
+        include_shared: bool = False,
     ) -> List[Dict[str, Any]]:
         """
-        Get memories from database.
-        
-        Args:
-            memory_type: Filter by memory type
-            limit: Maximum number of results
-            offset: Offset for pagination
-            
-        Returns:
-            List of memory dictionaries
+        List memories ordered by importance.
+
+        ``user_id``/``canonical_user_id`` filter to that user; with neither, all users
+        are listed (admin view). Pass ``scope_user`` (``None`` = shared pool) for
+        strict retrieval scoping instead.
         """
         session = self.get_session()
         try:
-            query = session.query(Memory)
-            
-            if self.namespace:
-                query = query.filter(Memory.namespace == self.namespace)
-            
+            q = session.query(Memory)
+            if not include_invalid:
+                q = q.filter(Memory.invalidated_at.is_(None))
+            q = self._ns_filter(q, Memory)
             if memory_type:
-                query = query.filter(Memory.memory_type == memory_type)
-            
-            memories = query.order_by(Memory.importance_score.desc()).limit(limit).offset(offset).all()
-            
-            return [
-                {
-                    "id": m.id,
-                    "content": m.content,
-                    "type": m.memory_type,
-                    "metadata": m.extra_metadata or {},
-                    "embedding": m.embedding,
-                    "importance_score": m.importance_score,
-                    "created_at": m.created_at.isoformat() if m.created_at else None,
-                }
-                for m in memories
-            ]
+                q = q.filter(Memory.memory_type == memory_type)
+            uid = scope_user if scope_user is not _UNSET else self._resolve_user_arg(user_id, canonical_user_id)
+            q = self._user_filter(q, Memory, uid, include_shared)
+            rows = (
+                q.order_by(Memory.importance_score.desc(), Memory.id.desc())
+                .limit(limit)
+                .offset(offset)
+                .all()
+            )
+            return [self._memory_to_dict(m) for m in rows]
         except Exception as e:
-            logger.error(f"Failed to get memories: {e}")
+            logger.error("Failed to get memories: %s", e)
             return []
         finally:
             session.close()
 
     async def search_memories_text(
-        self, query: str, limit: int = 10, memory_type: Optional[str] = None
+        self,
+        query: str,
+        limit: int = 10,
+        memory_type: Optional[str] = None,
+        user_id: Optional[str] = None,
+        canonical_user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Full-text search for memories.
-        
-        Args:
-            query: Search query
-            limit: Maximum number of results
-            memory_type: Filter by memory type
-            
-        Returns:
-            List of matching memories
-        """
-        session = self.get_session()
+        """Keyword search (FTS5/BM25, then LIKE as a last resort)."""
+        uid = self._resolve_user_arg(user_id, canonical_user_id)
         try:
-            # Simple LIKE search (can be enhanced with full-text search)
-            search_pattern = f"%{query}%"
-            db_query = session.query(Memory).filter(Memory.content.like(search_pattern))
-            
-            if self.namespace:
-                db_query = db_query.filter(Memory.namespace == self.namespace)
-            
-            if memory_type:
-                db_query = db_query.filter(Memory.memory_type == memory_type)
-            
-            memories = db_query.order_by(Memory.importance_score.desc()).limit(limit).all()
-            
-            return [
-                {
-                    "id": m.id,
-                    "content": m.content,
-                    "type": m.memory_type,
-                    "metadata": m.extra_metadata or {},
-                    "importance_score": m.importance_score,
-                }
-                for m in memories
-            ]
+            hits = self.lexical_search("fact", query, k=limit, user_id=uid, memory_type=memory_type)
+            if hits:
+                return self.hydrate_memories([h[0] for h in hits], user_id=uid)[:limit]
+            session = self.get_session()
+            try:
+                q = session.query(Memory).filter(
+                    Memory.content.like(f"%{query}%"), Memory.invalidated_at.is_(None)
+                )
+                q = self._user_filter(self._ns_filter(q, Memory), Memory, uid)
+                if memory_type:
+                    q = q.filter(Memory.memory_type == memory_type)
+                rows = q.order_by(Memory.importance_score.desc()).limit(limit).all()
+                return [self._memory_to_dict(m) for m in rows]
+            finally:
+                session.close()
         except Exception as e:
-            logger.error(f"Failed to search memories: {e}")
+            logger.error("Failed to search memories: %s", e)
             return []
-        finally:
-            session.close()
 
-    async def update_memory_importance(self, memory_id: int, importance_score: float):
-        """
-        Update memory importance score.
-        
-        Args:
-            memory_id: Memory ID
-            importance_score: New importance score
-        """
+    # ------------------------------------------------------------------ sessions & summaries
+
+    def upsert_session(self, session_id: str, user_id: Optional[str], turns_added: int = 0) -> None:
         session = self.get_session()
         try:
-            memory = session.query(Memory).filter(Memory.id == memory_id).first()
-            if memory:
-                memory.importance_score = importance_score
-                memory.updated_at = datetime.utcnow()
-                session.commit()
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Failed to update memory importance: {e}")
-        finally:
-            session.close()
-
-    async def delete_memory(self, memory_id: int):
-        """
-        Delete a memory.
-        
-        Args:
-            memory_id: Memory ID to delete
-        """
-        session = self.get_session()
-        try:
-            memory = session.query(Memory).filter(Memory.id == memory_id).first()
-            if memory:
-                session.delete(memory)
-                session.commit()
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Failed to delete memory: {e}")
-        finally:
-            session.close()
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Get storage statistics."""
-        session = self.get_session()
-        try:
-            total_memories = session.query(Memory).count()
-            if self.namespace:
-                namespace_memories = (
-                    session.query(Memory).filter(Memory.namespace == self.namespace).count()
+            rec = (
+                self._ns_filter(session.query(SessionRecord), SessionRecord)
+                .filter(SessionRecord.session_id == session_id)
+                .first()
+            )
+            now = utcnow()
+            if rec is None:
+                session.add(
+                    SessionRecord(
+                        namespace=self.namespace,
+                        session_id=session_id,
+                        user_id=user_id,
+                        started_at=now,
+                        last_active_at=now,
+                        turn_count=turns_added,
+                    )
                 )
             else:
-                namespace_memories = total_memories
+                rec.last_active_at = now
+                rec.turn_count = (rec.turn_count or 0) + turns_added
+                if user_id and not rec.user_id:
+                    rec.user_id = user_id
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.debug("upsert_session failed: %s", e)
+        finally:
+            session.close()
 
+    def get_session_record(self, session_id: str) -> Optional[Dict[str, Any]]:
+        session = self.get_session()
+        try:
+            rec = (
+                self._ns_filter(session.query(SessionRecord), SessionRecord)
+                .filter(SessionRecord.session_id == session_id)
+                .first()
+            )
+            if rec is None:
+                return None
             return {
-                "total_memories": total_memories,
-                "namespace_memories": namespace_memories,
+                "session_id": rec.session_id,
+                "user_id": rec.user_id,
+                "summary": rec.summary,
+                "turn_count": rec.turn_count,
+                "started_at": _iso(rec.started_at),
+                "last_active_at": _iso(rec.last_active_at),
+                "ended_at": _iso(rec.ended_at),
+            }
+        finally:
+            session.close()
+
+    async def store_summary(self, key: str, summary: str, session_id: Optional[str] = None) -> None:
+        """Persist the rolling summary for one session (``key`` is ``namespace:session``)."""
+        sid = session_id or (key.split(":", 1)[1] if ":" in key else key)
+        session = self.get_session()
+        try:
+            rec = (
+                self._ns_filter(session.query(SessionRecord), SessionRecord)
+                .filter(SessionRecord.session_id == sid)
+                .first()
+            )
+            if rec is None:
+                rec = SessionRecord(namespace=self.namespace, session_id=sid)
+                session.add(rec)
+            rec.summary = summary
+            rec.last_active_at = utcnow()
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.debug("store_summary failed: %s", e)
+        finally:
+            session.close()
+
+    async def get_session_summary(self, session_id: str) -> Optional[str]:
+        rec = self.get_session_record(session_id)
+        return rec.get("summary") if rec else None
+
+    async def store_conversation(
+        self,
+        messages: List[Dict[str, Any]],
+        response: Optional[Any] = None,
+        extracted_memories: Optional[List[Dict[str, Any]]] = None,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> None:
+        """Legacy per-call log (L0 lives in ``turns``)."""
+
+        def _jsonable(obj: Any) -> Any:
+            try:
+                return json.loads(json.dumps(obj, default=str))
+            except Exception:
+                return str(obj)
+
+        session = self.get_session()
+        try:
+            session.add(
+                Conversation(
+                    namespace=self.namespace,
+                    messages=_jsonable(messages),
+                    response=_jsonable(response),
+                    extracted_memories=_jsonable(
+                        [
+                            {k: v for k, v in m.items() if k != "embedding"}
+                            for m in extracted_memories or []
+                            if isinstance(m, dict)
+                        ]
+                    ),
+                    session_id=session_id,
+                    user_id=user_id,
+                )
+            )
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error("Failed to store conversation: %s", e)
+        finally:
+            session.close()
+
+    async def get_recent_conversations(self, limit: int = 5) -> List[Dict[str, Any]]:
+        session = self.get_session()
+        try:
+            q = self._ns_filter(session.query(Conversation), Conversation)
+            rows = q.order_by(Conversation.created_at.desc()).limit(limit).all()
+            return [
+                {
+                    "id": c.id,
+                    "summary": c.summary,
+                    "session_id": c.session_id,
+                    "created_at": _iso(c.created_at),
+                }
+                for c in rows
+            ]
+        finally:
+            session.close()
+
+    # ------------------------------------------------------------------ serialisation
+
+    def _memory_to_dict(self, m: Memory) -> Dict[str, Any]:
+        return {
+            "kind": "fact",
+            "id": m.id,
+            "content": m.content,
+            "type": m.memory_type,
+            "metadata": m.extra_metadata or {},
+            "embedding": m.embedding,
+            "importance_score": m.importance_score,
+            "access_count": m.access_count or 0,
+            "created_at": _iso(m.created_at),
+            "updated_at": _iso(m.updated_at),
+            "valid_from": _iso(m.valid_from),
+            "valid_to": _iso(m.valid_to),
+            "invalidated_at": _iso(m.invalidated_at),
+            "superseded_by_id": m.superseded_by_id,
+            "supersedes_id": m.supersedes_id,
+            "confidence": m.confidence,
+            "session_id": m.session_id,
+            "user_id": m.user_id,
+            "source": m.source,
+            "source_episode_id": m.source_episode_id,
+            "source_turn_ids": m.source_turn_ids,
+        }
+
+    @staticmethod
+    def episode_to_dict(e: Episode) -> Dict[str, Any]:
+        return {
+            "kind": "episode",
+            "id": e.id,
+            "session_id": e.session_id,
+            "user_id": e.user_id,
+            "status": e.status,
+            "title": e.title,
+            "summary": e.summary,
+            "key_points": e.key_points or [],
+            "entities": e.entity_names or [],
+            "start_time": _iso(e.start_time),
+            "end_time": _iso(e.end_time),
+            "start_seq": e.start_seq,
+            "end_seq": e.end_seq,
+            "turn_count": e.turn_count,
+            "boundary_reason": e.boundary_reason,
+        }
+
+    @staticmethod
+    def turn_to_dict(t: Turn) -> Dict[str, Any]:
+        return {
+            "kind": "turn",
+            "id": t.id,
+            "session_id": t.session_id,
+            "user_id": t.user_id,
+            "seq": t.seq,
+            "role": t.role,
+            "content": t.content,
+            "episode_id": t.episode_id,
+            "occurred_at": _iso(t.occurred_at),
+        }
+
+    def get_stats(self) -> Dict[str, Any]:
+        session = self.get_session()
+        try:
+            total = session.query(Memory).count()
+            ns_q = self._ns_filter(session.query(Memory), Memory)
+            return {
+                "total_memories": total,
+                "namespace_memories": ns_q.count() if self.namespace else total,
+                "active_memories": ns_q.filter(Memory.invalidated_at.is_(None)).count(),
+                "episodes": self._ns_filter(session.query(Episode), Episode).count(),
+                "turns": self._ns_filter(session.query(Turn), Turn).count(),
+                "sessions": self._ns_filter(session.query(SessionRecord), SessionRecord).count(),
+                "entities": self._ns_filter(session.query(Entity), Entity).count(),
+                "relations": self._ns_filter(session.query(Relation), Relation)
+                .filter(Relation.invalidated_at.is_(None))
+                .count(),
                 "namespace": self.namespace,
+                "fts": self._fts_enabled,
             }
         except Exception as e:
-            logger.error(f"Failed to get stats: {e}")
+            logger.error("Failed to get stats: %s", e)
             return {}
         finally:
             session.close()
-

@@ -1,195 +1,246 @@
 """
-LLM Call Interceptor
+LLM call interceptor (zero-code integration).
 
-Transparently intercepts LLM calls to inject context and record conversations.
-Inspired by Memori's interceptor-based architecture.
+Patches the SDK *resource classes* so every client instance is covered, sync and
+async:
 
-Reference: https://github.com/GibsonAI/Memori
+    openai.resources.chat.completions.Completions.create      (+ AsyncCompletions)
+    openai.resources.responses.Responses.create               (+ AsyncResponses)
+    anthropic.resources.messages.Messages.create              (+ AsyncMessages)
+    litellm.completion / litellm.acompletion
+
+The previous implementation patched ``OpenAI.chat.completions``, which does not
+exist on the class (``chat`` is a cached_property on the instance), so the OpenAI
+and Anthropic hooks silently never attached.
+
+Guards:
+* calls made by Memorable itself (extraction, summaries) are never intercepted
+* a provider call nested inside an intercepted call (litellm -> openai) is not
+  intercepted twice
+* any memory failure is logged and the user's LLM call proceeds unchanged
+
+Inspired by Memori's interceptor architecture (https://github.com/GibsonAI/Memori).
 """
 
 import functools
+import importlib
 import inspect
-from typing import Any, Callable, Dict, List, Optional, Union
 import logging
+import threading
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type
+
+from memorable_ai.core.providers import (
+    Adapter,
+    AnthropicAdapter,
+    AsyncStreamProxy,
+    LiteLLMAdapter,
+    OpenAIChatAdapter,
+    OpenAIResponsesAdapter,
+    SyncStreamProxy,
+)
+from memorable_ai.core.scope import _suppress, is_suppressed
 
 logger = logging.getLogger(__name__)
 
+# key -> (module, attribute path, adapter class, is_async)
+TARGETS: Dict[str, Tuple[str, str, Type[Adapter], bool]] = {
+    "openai.chat.completions.create": ("openai.resources.chat.completions", "Completions.create", OpenAIChatAdapter, False),
+    "openai.chat.completions.acreate": ("openai.resources.chat.completions", "AsyncCompletions.create", OpenAIChatAdapter, True),
+    "openai.responses.create": ("openai.resources.responses", "Responses.create", OpenAIResponsesAdapter, False),
+    "openai.responses.acreate": ("openai.resources.responses", "AsyncResponses.create", OpenAIResponsesAdapter, True),
+    "anthropic.messages.create": ("anthropic.resources.messages", "Messages.create", AnthropicAdapter, False),
+    "anthropic.messages.acreate": ("anthropic.resources.messages", "AsyncMessages.create", AnthropicAdapter, True),
+    "litellm.completion": ("litellm", "completion", LiteLLMAdapter, False),
+    "litellm.acompletion": ("litellm", "acompletion", LiteLLMAdapter, True),
+}
+
+
+def _resolve(module_name: str, path: str) -> Tuple[Any, str, Callable]:
+    module = importlib.import_module(module_name)
+    owner: Any = module
+    parts = path.split(".")
+    for part in parts[:-1]:
+        owner = getattr(owner, part)
+    return owner, parts[-1], getattr(owner, parts[-1])
+
+
+# Process-wide patch registry. SDK methods are patched once; calls dispatch to the most
+# recently enabled interceptor, so several engines (or one that was never disabled)
+# cannot stack wrappers or leave a stale engine receiving calls.
+_LOCK = threading.RLock()
+_ORIGINALS: Dict[str, Callable] = {}
+_OWNERS: Dict[str, Tuple[Any, str]] = {}
+_STACK: List["LLMInterceptor"] = []
+
+
+def _current() -> Optional["LLMInterceptor"]:
+    with _LOCK:
+        for icp in reversed(_STACK):
+            if icp._enabled and icp.memory_engine is not None:
+                return icp
+    return None
+
+
+def _install(key: str) -> bool:
+    if key in _ORIGINALS:
+        return True
+    module_name, path, adapter_cls, is_async = TARGETS[key]
+    try:
+        owner, attr, original = _resolve(module_name, path)
+    except Exception as e:
+        logger.debug("Skipping %s: %s", key, e)
+        return False
+    original = getattr(original, "__memorable_original__", original)
+    adapter = adapter_cls()
+    if is_async or inspect.iscoroutinefunction(original):
+        wrapper = _make_async(original, adapter)
+    else:
+        wrapper = _make_sync(original, adapter)
+    wrapper.__memorable_wrapped__ = True  # type: ignore[attr-defined]
+    wrapper.__memorable_original__ = original  # type: ignore[attr-defined]
+    setattr(owner, attr, wrapper)
+    _ORIGINALS[key] = original
+    _OWNERS[key] = (owner, attr)
+    logger.debug("Hooked %s", key)
+    return True
+
+
+def _uninstall_all() -> None:
+    for key in list(_ORIGINALS):
+        owner, attr = _OWNERS.pop(key)
+        try:
+            setattr(owner, attr, _ORIGINALS.pop(key))
+        except Exception as e:  # pragma: no cover
+            logger.debug("Restore failed for %s: %s", key, e)
+
 
 class LLMInterceptor:
-    """
-    Intercepts LLM API calls transparently to inject memory context
-    and record conversations for memory storage.
-    
-    This allows zero-code integration - existing code works unchanged.
-    """
+    """Transparently injects memory into LLM calls and records the exchange."""
 
-    def __init__(self, memory_engine: Any):
-        """
-        Initialize interceptor with memory engine.
-        
-        Args:
-            memory_engine: MemoryEngine instance for context injection and storage
-        """
+    def __init__(self, memory_engine: Any, targets: Optional[List[str]] = None):
         self.memory_engine = memory_engine
+        self.targets = targets or list(TARGETS)
         self._original_methods: Dict[str, Callable] = {}
         self._enabled = False
 
-    def enable(self):
-        """Enable interception of LLM calls."""
+    @property
+    def hooked(self) -> List[str]:
+        return sorted(self._original_methods)
+
+    def enable(self) -> None:
         if self._enabled:
             logger.warning("Interceptor already enabled")
             return
+        with _LOCK:
+            for key in self.targets:
+                _install(key)
+            if self in _STACK:
+                _STACK.remove(self)
+            _STACK.append(self)
+            self._original_methods = {k: _ORIGINALS[k] for k in self.targets if k in _ORIGINALS}
+            self._enabled = True
+        logger.info("LLM interceptor enabled: %s", ", ".join(self.hooked) or "no SDKs found")
 
-        self._enabled = True
-        self._hook_openai()
-        self._hook_anthropic()
-        self._hook_litellm()
-        logger.info("LLM interceptor enabled")
-
-    def disable(self):
-        """Disable interception and restore original methods."""
+    def disable(self) -> None:
         if not self._enabled:
             return
-
-        self._restore_openai()
-        self._restore_anthropic()
-        self._restore_litellm()
-        self._enabled = False
+        with _LOCK:
+            self._enabled = False
+            if self in _STACK:
+                _STACK.remove(self)
+            if not any(i._enabled for i in _STACK):
+                _STACK.clear()
+                _uninstall_all()
+            self._original_methods = {}
         logger.info("LLM interceptor disabled")
 
-    def _hook_openai(self):
-        """Hook OpenAI client methods."""
-        try:
-            from openai import OpenAI
+    # Backwards-compatible names
+    def _hook_openai(self) -> None:
+        for k in ("openai.chat.completions.create", "openai.chat.completions.acreate", "openai.responses.create", "openai.responses.acreate"):
+            self._hook(k)
 
-            # Hook the chat.completions.create method
-            if hasattr(OpenAI, "chat") and hasattr(OpenAI.chat, "completions"):
-                original_create = OpenAI.chat.completions.create
+    def _hook_anthropic(self) -> None:
+        for k in ("anthropic.messages.create", "anthropic.messages.acreate"):
+            self._hook(k)
 
-                @functools.wraps(original_create)
-                def sync_wrapper(*args, **kwargs):
-                    return self._intercept_call_sync(original_create, *args, **kwargs)
+    def _hook_litellm(self) -> None:
+        for k in ("litellm.completion", "litellm.acompletion"):
+            self._hook(k)
 
-                # Replace with wrapper
-                OpenAI.chat.completions.create = sync_wrapper
-                self._original_methods["openai.chat.completions.create"] = original_create
-                logger.debug("OpenAI interceptor hooked")
-        except ImportError:
-            logger.debug("OpenAI not available, skipping hook")
+    def _hook(self, key: str) -> bool:
+        with _LOCK:
+            ok = _install(key)
+            if ok:
+                self._original_methods[key] = _ORIGINALS[key]
+            return ok
 
-    def _hook_anthropic(self):
-        """Hook Anthropic client methods."""
-        try:
-            from anthropic import Anthropic
-
-            if hasattr(Anthropic, "messages") and hasattr(Anthropic.messages, "create"):
-                original_create = Anthropic.messages.create
-
-                @functools.wraps(original_create)
-                def sync_wrapper(*args, **kwargs):
-                    return self._intercept_call_sync(original_create, *args, **kwargs)
-
-                Anthropic.messages.create = sync_wrapper
-                self._original_methods["anthropic.messages.create"] = original_create
-                logger.debug("Anthropic interceptor hooked")
-        except ImportError:
-            logger.debug("Anthropic not available, skipping hook")
-
-    def _hook_litellm(self):
-        """Hook LiteLLM completion function."""
-        try:
-            import litellm
-            from litellm import completion
-
-            original_completion = completion
-
-            @functools.wraps(original_completion)
-            def sync_wrapper(*args, **kwargs):
-                return self._intercept_call_sync(original_completion, *args, **kwargs)
-
-            litellm.completion = sync_wrapper
-            self._original_methods["litellm.completion"] = original_completion
-            logger.debug("LiteLLM interceptor hooked")
-        except ImportError:
-            logger.debug("LiteLLM not available, skipping hook")
-
-    def _restore_openai(self):
-        """Restore original OpenAI methods."""
-        if "openai.chat.completions.create" in self._original_methods:
-            try:
-                from openai import OpenAI
-                OpenAI.chat.completions.create = self._original_methods["openai.chat.completions.create"]
-                logger.debug("OpenAI methods restored")
-            except ImportError:
-                pass
-
-    def _restore_anthropic(self):
-        """Restore original Anthropic methods."""
-        if "anthropic.messages.create" in self._original_methods:
-            try:
-                from anthropic import Anthropic
-                Anthropic.messages.create = self._original_methods["anthropic.messages.create"]
-                logger.debug("Anthropic methods restored")
-            except ImportError:
-                pass
-
-    def _restore_litellm(self):
-        """Restore original LiteLLM function."""
-        if "litellm.completion" in self._original_methods:
-            try:
-                import litellm
-                litellm.completion = self._original_methods["litellm.completion"]
-                logger.debug("LiteLLM function restored")
-            except ImportError:
-                pass
-
+    # Kept for callers that used the old private API directly.
     def _intercept_call_sync(self, original_func: Callable, *args, **kwargs):
-        """
-        Intercept sync LLM call: inject context, call LLM, store response.
-        
-        Args:
-            original_func: Original LLM function to call
-            *args: Positional arguments
-            **kwargs: Keyword arguments (messages, etc.)
-            
-        Returns:
-            LLM response
-        """
-        # Extract messages from kwargs
-        messages = kwargs.get("messages", [])
-        if not messages and args:
-            if isinstance(args[0], list):
-                messages = args[0]
+        return _make_sync(original_func, LiteLLMAdapter())(*args, **kwargs)
 
-        # Pre-call: Retrieve relevant memories and inject context
-        if messages and self.memory_engine:
-            try:
-                enhanced_messages = self.memory_engine._inject_context_sync(messages)
-                if enhanced_messages and len(enhanced_messages) > len(messages):
-                    logger.info(f"Context injected: {len(enhanced_messages)} messages (original: {len(messages)})")
-                    if enhanced_messages[0].get("role") == "system":
-                        context_preview = enhanced_messages[0].get("content", "")[:200]
-                        logger.debug(f"Injected context preview: {context_preview}...")
-                    kwargs["messages"] = enhanced_messages
-                elif enhanced_messages:
-                    logger.debug(f"No context injected, returning original messages")
-            except Exception as e:
-                logger.warning(f"Failed to inject context: {e}")
-                import traceback
-                logger.debug(traceback.format_exc())
 
-        # Call original LLM function
+# ---------------------------------------------------------------------- wrappers
+
+
+def _make_sync(original: Callable, adapter: Adapter) -> Callable:
+    @functools.wraps(original)
+    def wrapper(*args, **kwargs):
+        interceptor = None if is_suppressed() else _current()
+        if interceptor is None:
+            return original(*args, **kwargs)
+        engine = interceptor.memory_engine
+        args, kwargs = adapter.bind(args, kwargs)
+        call = None
+        token = _suppress.set(True)
         try:
-            response = original_func(*args, **kwargs)
-        except Exception as e:
-            logger.error(f"LLM call failed: {e}")
-            raise
-
-        # Post-call: Extract and store memories from conversation
-        if messages and response and self.memory_engine:
             try:
-                self.memory_engine._store_conversation_sync(messages, response)
+                call = engine._prepare_call(adapter, kwargs)
+                kwargs = call.kwargs
             except Exception as e:
-                logger.warning(f"Failed to store conversation: {e}")
-
+                logger.warning("Memory retrieval failed; calling LLM without memory: %s", e)
+            response = original(*args, **kwargs)
+        finally:
+            _suppress.reset(token)
+        if call is None:
+            return response
+        if adapter.is_stream(kwargs):
+            return SyncStreamProxy(response, adapter, lambda text: engine._record_call(call, text))
+        try:
+            engine._record_call(call, adapter.response_text(response))
+        except Exception as e:
+            logger.warning("Failed to record conversation: %s", e)
         return response
+
+    return wrapper
+
+
+def _make_async(original: Callable, adapter: Adapter) -> Callable:
+    @functools.wraps(original)
+    async def wrapper(*args, **kwargs):
+        interceptor = None if is_suppressed() else _current()
+        if interceptor is None:
+            return await original(*args, **kwargs)
+        engine = interceptor.memory_engine
+        args, kwargs = adapter.bind(args, kwargs)
+        call = None
+        token = _suppress.set(True)
+        try:
+            try:
+                call = await engine._aprepare_call(adapter, kwargs)
+                kwargs = call.kwargs
+            except Exception as e:
+                logger.warning("Memory retrieval failed; calling LLM without memory: %s", e)
+            response = await original(*args, **kwargs)
+        finally:
+            _suppress.reset(token)
+        if call is None:
+            return response
+        if adapter.is_stream(kwargs):
+            return AsyncStreamProxy(response, adapter, lambda text: engine._record_call(call, text))
+        try:
+            await engine._arecord_call(call, adapter.response_text(response))
+        except Exception as e:
+            logger.warning("Failed to record conversation: %s", e)
+        return response
+
+    return wrapper
