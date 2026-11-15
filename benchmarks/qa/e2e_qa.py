@@ -48,7 +48,7 @@ LME = ROOT / "benchmarks" / "longmemeval" / "data" / "longmemeval_s_cleaned.json
 LOCOMO_CATS = {1: "multi-hop", 2: "temporal", 3: "open-domain", 4: "single-hop"}
 
 # Answer and judge model (prereg v1.1): Nemotron-3.5-Lightning (30B MoE, 3B active) on NVIDIA
-# NIM's free tier. Answers think (chat_template_kwargs.enable_thinking=true, up to 2,000 tokens);
+# NIM's free tier. Answers think (chat_template_kwargs.enable_thinking=true, up to 8,192 tokens);
 # the judge does not. DeepSeek V4.1 Flash (billion-context's eval model) answers correctly but the
 # free tier queues it to ~1.4 calls/min, so it only runs an optional comparability slice.
 # Gemini 3 Flash is the paid fallback, used only with the owner's approval.
@@ -59,8 +59,11 @@ PRICES = {  # USD per token
 }
 PRICE = next(v for k, v in PRICES.items() if MODEL.startswith(k))
 CAP_USD = 60.0
-TURN_CHARS = 2000
-LENIENT_ARMS = {"A0", "A3", "A4"}  # Mem0's lenient judge, only to sit beside published LoCoMo numbers  # the pipeline embeds content[:2000]; longer turns are cut in the prompt too
+TURN_CHARS = 2000  # the pipeline embeds content[:2000]; longer turns are cut in the prompt too
+LENIENT_ARMS = {"A0", "A3", "A4"}  # Mem0's lenient judge, only to sit beside published LoCoMo numbers
+# prereg v2: thinking answers get 8,192 output tokens. With 2,000, the pilot lost 4 of 30 answers to
+# thinking that hit the cap before any reply was written.
+ANSWER_MAX_TOKENS = 8192
 
 ETTIN17 = "cross-encoder/ettin-reranker-17m-v1"
 ARMS: Dict[str, Dict[str, Any]] = {
@@ -383,7 +386,7 @@ async def _complete(msgs, *, effort: str, max_tokens: int):
         r = await nim["http"].post(
             f"{nim['base']}/chat/completions", headers={"Authorization": f"Bearer {nim['key']}"},
             json={"model": MODEL.split("/", 1)[1], "messages": msgs, "temperature": 0,
-                  "max_tokens": max_tokens if not think else max(max_tokens, 2000),
+                  "max_tokens": max_tokens if not think else max(max_tokens, ANSWER_MAX_TOKENS),
                   "chat_template_kwargs": {"enable_thinking": think}})
         if r.status_code != 200:
             raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
@@ -498,7 +501,7 @@ async def answer_one(rec: Dict[str, Any], ledger: Ledger, stub: bool, sem) -> Di
                                   question=rec["question"])
     async with sem:
         t = time.perf_counter()
-        text, usage = await llm_call(prompt, system=None, effort="low", max_tokens=1024,
+        text, usage = await llm_call(prompt, system=None, effort="low", max_tokens=ANSWER_MAX_TOKENS,
                                      stub=_stub_answer(rec["context"]) if stub else None)
     ledger.add({"arm": rec["arm"], "qid": rec["qid"], "call": "answer", "usage": usage, "cost": _cost(usage),
                 "ms": round(1000 * (time.perf_counter() - t)), "parsed": bool(text)})
@@ -558,17 +561,29 @@ async def cmd_answer(args) -> None:
 # ------------------------------------------------------------------ decoys
 
 
-def _perturb(gold: str, rng: random.Random) -> str:
-    m = re.search(r"\b(19|20)\d{2}\b", gold)
-    if m:
-        return gold.replace(m.group(0), str(int(m.group(0)) + rng.choice((-2, 2))), 1)
-    m = re.search(r"\b\d+\b", gold)
-    if m:
-        return gold.replace(m.group(0), str(int(m.group(0)) + 3), 1)
+def _perturb(gold: str, rng: random.Random) -> Optional[str]:
+    """Change the answer's key fact (prereg: entity, number or year), or None if there is no clear one.
+
+    The first pilot found two invalid decoys from an earlier version that swapped any capitalised
+    word: "Likely no, ..." -> "Toronto no, ..." kept its meaning, and one item of a ten-item list
+    left nine correct items. So: years and numbers first, then a proper noun that is not the first
+    word, and never list answers.
+    """
+    if gold.count(",") >= 2:
+        return None
+    if re.search(r"\b(19|20)\d{2}\b", gold):  # every year moves, so no alternative stays correct
+        shift = rng.choice((-2, 2))
+        return re.sub(r"\b(19|20)\d{2}\b", lambda m: str(int(m.group(0)) + shift), gold)
+    if re.search(r"\d+", gold):
+        return re.sub(r"\d+", lambda m: str(int(m.group(0)) + 3), gold)
+    if "," in gold or " and " in gold or "&" in gold:  # several items: one swap would leave others right
+        return None
     words = gold.split()
-    caps = [i for i, w in enumerate(words) if w[:1].isupper() and i > 0] or [0]
-    i = rng.choice(caps)
-    words[i] = rng.choice(("Lisbon", "Marcus", "violin", "Toronto", "chess", "Priya"))
+    nouns = [i for i, w in enumerate(words) if i > 0 and w[:1].isupper() and w.strip(",.").isalpha()]
+    if not nouns:
+        return None
+    i = rng.choice(nouns)
+    words[i] = rng.choice(("Lisbon", "Marcus", "Toronto", "Priya", "Oslo", "Kenji"))
     return " ".join(words)
 
 
@@ -584,9 +599,18 @@ async def cmd_decoys(args) -> None:
     rows = []
     for bench, items in (("locomo", locomo_items()), ("lme", [i for i in lme_items("dev")
                                                              if i["category"] != "single-session-preference"])):
-        pool = rng.sample(items, 40)
-        for kind, chunk in zip(("gold", "shuffled", "dont_know", "perturbed"), (pool[:10], pool[10:20], pool[20:30],
-                                                                               pool[30:40])):
+        order = rng.sample(items, len(items))
+        pool, rest = order[:30], order[30:]
+        perturbable = []
+        for it in rest:  # 10 items whose answer has a clear key fact to change
+            alt = _perturb(it["answer"], rng)
+            if alt is not None:
+                perturbable.append((it, alt))
+            if len(perturbable) == 10:
+                break
+        alts = {it["qid"]: alt for it, alt in perturbable}
+        for kind, chunk in zip(("gold", "shuffled", "dont_know", "perturbed"),
+                               (pool[:10], pool[10:20], pool[20:30], [it for it, _ in perturbable])):
             for it in chunk:
                 if kind == "gold":
                     resp, expect = it["answer"], True
@@ -597,7 +621,7 @@ async def cmd_decoys(args) -> None:
                 elif kind == "dont_know":
                     resp, expect = "I don't know; the memories don't mention it.", False
                 else:
-                    resp, expect = _perturb(it["answer"], rng), False
+                    resp, expect = alts[it["qid"]], False
                 rows.append(({**_public(it), "arm": f"decoy:{kind}"}, resp, expect, kind))
     sem = asyncio.Semaphore(args.concurrency)
     verdicts = await asyncio.gather(*(judge(r, resp, ledger, args.stub, sem) for r, resp, _, _ in rows))
@@ -609,6 +633,11 @@ async def cmd_decoys(args) -> None:
                 acc[key][0] += v[name] is expect
                 acc[key][1] += 1
     report = {f"{b}/{j}/{k}": round(h / n, 3) for (b, j, k), (h, n) in sorted(acc.items())}
+    with open(run / f"decoys_{tag}_items.jsonl", "w") as f:
+        for (r, resp, expect, kind), v in zip(rows, verdicts):
+            f.write(json.dumps({"bench": r["bench"], "kind": kind, "question": r["question"], "gold": r["answer"],
+                                "response": resp, "expect_correct": expect,
+                                **{k: v[k] for k in ("j", "j_strict", "j_lenient") if k in v}}) + "\n")
     strict_ok = all(v >= 0.95 for k, v in report.items() if "/j_lenient/" not in k)
     json.dump({"decoys": report, "spent_usd": round(ledger.spent, 4)}, open(run / f"decoys_{tag}.json", "w"), indent=2)
     print(json.dumps(report, indent=1))
