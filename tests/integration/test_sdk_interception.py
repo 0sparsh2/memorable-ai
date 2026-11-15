@@ -1,14 +1,16 @@
 """
 Zero-code interception against the real OpenAI / Anthropic SDKs.
 
-No network: each client gets an ``httpx.MockTransport`` that records the request
-body and returns a canned response. These tests check what actually goes over
+No network: each client gets a mock transport that records the request body and
+returns a canned response. The transport comes from whichever HTTP library the
+installed SDK is built on (``httpx``, or ``httpx2`` in anthropic>=2). These tests check what actually goes over
 the wire: memory is injected into the system prompt for OpenAI and into the
 ``system`` parameter for Anthropic (never a system-role message), it is scoped
 to the calling user, and the exchange is recorded afterwards.
 """
 
 import asyncio
+import importlib
 import json
 
 import httpx
@@ -71,44 +73,48 @@ def _sse(events, named=False):
     return ("\n".join(lines) + "\n").encode()
 
 
+def _http_lib(sdk):
+    """The HTTP library an SDK's client is built on: httpx, or httpx2 (anthropic>=2)."""
+    try:
+        base = importlib.import_module(f"{sdk.__name__}._base_client")
+    except ImportError:
+        return httpx
+    return getattr(base, "httpx2", None) or getattr(base, "httpx", None) or httpx
+
+
 class Recorder:
     def __init__(self, body=None, stream_body=None):
         self.requests = []
         self.body = body
         self.stream_body = stream_body
+        self.lib = httpx  # set by the client factory to the SDK's HTTP library
 
-    def __call__(self, request: httpx.Request) -> httpx.Response:
+    def __call__(self, request):
         payload = json.loads(request.content or b"{}")
         self.requests.append(payload)
         if payload.get("stream"):
-            return httpx.Response(200, content=self.stream_body, headers={"content-type": "text/event-stream"})
-        return httpx.Response(200, json=self.body)
+            return self.lib.Response(200, content=self.stream_body, headers={"content-type": "text/event-stream"})
+        return self.lib.Response(200, json=self.body)
 
     @property
     def last(self):
         return self.requests[-1]
 
 
+def _mock_client(sdk, recorder, is_async):
+    lib = recorder.lib = _http_lib(sdk)
+    cls = lib.AsyncClient if is_async else lib.Client
+    return cls(transport=lib.MockTransport(recorder))
+
+
 def _openai(recorder, is_async=False):
-    if is_async:
-        return openai.AsyncOpenAI(
-            api_key="test", base_url="http://mock/v1",
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(recorder)),
-        )
-    return openai.OpenAI(
-        api_key="test", base_url="http://mock/v1", http_client=httpx.Client(transport=httpx.MockTransport(recorder))
-    )
+    cls = openai.AsyncOpenAI if is_async else openai.OpenAI
+    return cls(api_key="test", base_url="http://mock/v1", http_client=_mock_client(openai, recorder, is_async))
 
 
 def _anthropic(recorder, is_async=False):
-    if is_async:
-        return anthropic.AsyncAnthropic(
-            api_key="test", base_url="http://mock",
-            http_client=httpx.AsyncClient(transport=httpx.MockTransport(recorder)),
-        )
-    return anthropic.Anthropic(
-        api_key="test", base_url="http://mock", http_client=httpx.Client(transport=httpx.MockTransport(recorder))
-    )
+    cls = anthropic.AsyncAnthropic if is_async else anthropic.Anthropic
+    return cls(api_key="test", base_url="http://mock", http_client=_mock_client(anthropic, recorder, is_async))
 
 
 @pytest.fixture
