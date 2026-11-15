@@ -28,5 +28,29 @@ Fresh run directory, same dev contexts.
 
 **Answers (30).** 1 empty: A0 (full context) on a 108k-token LME history, where thinking looped to the 8,192-token cap. Median output 1,132 tokens. Latency p50: answers 5.2 s, judges 2.4–4.2 s at 120 requests/min. Under the rule the pilot stops again; v3 adds a no-thinking fallback for empty answers in every arm.
 
-## Attempt 3 (prereg v3)
-Results below.
+## Attempt 3 (prereg v3), 2026-11-15
+**Decoys (B6), pass.**
+
+| Judge | Decoys judged WRONG | Gold judged CORRECT |
+|---|---|---|
+| LME | 29/30 (96.7%) | 100% |
+| LoCoMo J-strict | 30/30 | 100% |
+| LoCoMo J-lenient (Mem0) | 76.7% | 100% |
+
+J-lenient is reported only; it accepted 7 of 30 wrong answers.
+
+**Answers (30).**
+- 0 empty and 0 fallbacks.
+- Latency, mean per call: answers 6.0 s (sd 4.0), judges 2.5–4.6 s.
+- Throughput: 92 calls/min sustained at concurrency 8 and a 120 requests/min ceiling, with no rate-limit errors.
+- Pilot correctness (3 items each, not a result): LoCoMo A0 2/3, A1 2/3, A2 3/3, A3 3/3, A3w 2/3; LME all arms 3/3.
+
+```
+PILOT_ARM: answer   unit=wall_clock mean=5.95s sd=4.02s n=30
+PILOT_ARM: judge    unit=wall_clock mean=2.48-4.64s n=36
+PILOT_PROJECTION: per_call≈0.65s (92 calls/min) total_calls=22678 (+5620 A4) projected=4.1h (+1.0h A4) band95=3.1h..6.3h (120..60 rpm) cap=14h verdict=within
+```
+
+- Cost: $0 on NIM's free tier.
+- The limiter is NIM's queue and the per-call thinking time, not local CPU.
+- The variation across calls comes from thinking length: answer output p50 is about 1.1k tokens, with a tail to the cap.
