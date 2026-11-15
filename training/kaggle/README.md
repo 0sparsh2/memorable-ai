@@ -5,6 +5,7 @@ GPU jobs for [docs/retrieval_round2.md](../../docs/retrieval_round2.md). Each ru
 | Job | What it does | GPU time |
 |---|---|---|
 | `qgen/` | Writes memory-recall questions, with evidence turn ids, over public dialogue corpora (ConversationChronicles, MSC, SODA, WildChat-1M). Generator: Qwen3-4B-Instruct-2507 under vLLM. Output: `qgen.jsonl`. | ≤ 3.5 h (generation is capped at 3 h) |
+| `lme_contexts/` | Builds the end-to-end QA eval's LongMemEval-S contexts. It clones the public branch, ingests all 500 haystacks through the real pipeline, and records every arm's memory context. Embeddings run on the GPUs, one worker per T4. No model is called. | ~1 h |
 | `embed_ft/` | Teacher filter and hard-negative mining (Qwen3-Embedding-0.6B), then contrastive fine-tunes of leaf-ir, MiniLM and potion-32M, plus BCE fine-tunes of three rerankers. Output: `models/`, `ft_report.json`. | about 1 h |
 
 No LoCoMo or LongMemEval data is used. ShareGPT and UltraChat are excluded because LongMemEval builds its filler sessions from them.

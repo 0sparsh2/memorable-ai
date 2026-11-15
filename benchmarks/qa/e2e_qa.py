@@ -288,11 +288,16 @@ async def cmd_retrieve(args) -> None:
     for it in items:
         groups[it["group"]].append(it)
     keys = list(groups)[: args.limit] if args.limit else list(groups)
+    suffix = ""
+    if args.shard:  # "i/n": this process takes every n-th group (parallel workers, one per GPU)
+        i, n = (int(x) for x in args.shard.split("/"))
+        keys = [k for j, k in enumerate(keys) if j % n == i]
+        suffix = f".shard{i}of{n}"
     tmp = Path(tempfile.mkdtemp(prefix="memorable_e2e_"))
     totals = {"groups": 0, "items": 0, "ingest_s": 0.0, "truncated_turns": 0, "empty": defaultdict(int)}
     t0 = time.time()
     try:
-        with open(run / f"contexts_{args.bench}.jsonl", "a") as out:
+        with open(run / f"contexts_{args.bench}{suffix}.jsonl", "a") as out:
             for gi, g in enumerate(keys):
                 s = await _contexts_for_group(groups[g], arms, tmp, out)
                 out.flush()
@@ -705,6 +710,7 @@ def main() -> None:
     p.add_argument("--run", required=True)
     p.add_argument("--limit", type=int, default=0, help="first N conversations / haystacks only")
     p.add_argument("--a0-dev", action="store_true", help="also build full-context (A0) prompts for LME dev rows")
+    p.add_argument("--shard", default="", help="i/n: process every n-th conversation/haystack (parallel workers)")
     for name in ("answer", "decoys", "report"):
         p = sub.add_parser(name)
         p.add_argument("--run", required=True)
