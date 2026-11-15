@@ -47,10 +47,20 @@ LOCOMO = ROOT / "benchmarks" / "locomo" / "data" / "locomo10.json"
 LME = ROOT / "benchmarks" / "longmemeval" / "data" / "longmemeval_s_cleaned.json"
 LOCOMO_CATS = {1: "multi-hop", 2: "temporal", 3: "open-domain", 4: "single-hop"}
 
-MODEL = "gemini/gemini-3-flash-preview"
-PRICE = {"in": 0.50e-6, "cached": 0.05e-6, "out": 3.00e-6}  # USD per token, ai.google.dev pricing, 2026-11-15
+# Answer and judge model (prereg v1.1): Nemotron-3.5-Lightning (30B MoE, 3B active) on NVIDIA
+# NIM's free tier. Answers think (chat_template_kwargs.enable_thinking=true, up to 2,000 tokens);
+# the judge does not. DeepSeek V4.1 Flash (billion-context's eval model) answers correctly but the
+# free tier queues it to ~1.4 calls/min, so it only runs an optional comparability slice.
+# Gemini 3 Flash is the paid fallback, used only with the owner's approval.
+MODEL = os.getenv("E2E_QA_MODEL", "nvidia_nim/nvidia/nemotron-3.5-lightning-30b-a3b")
+PRICES = {  # USD per token
+    "nvidia_nim/": {"in": 0.0, "cached": 0.0, "out": 0.0},  # free tier, rate-limited
+    "gemini/gemini-3-flash-preview": {"in": 0.50e-6, "cached": 0.05e-6, "out": 3.00e-6},  # ai.google.dev, 2026-11-15
+}
+PRICE = next(v for k, v in PRICES.items() if MODEL.startswith(k))
 CAP_USD = 60.0
-TURN_CHARS = 2000  # the pipeline embeds content[:2000]; longer turns are cut in the prompt too
+TURN_CHARS = 2000
+LENIENT_ARMS = {"A0", "A3", "A4"}  # Mem0's lenient judge, only to sit beside published LoCoMo numbers  # the pipeline embeds content[:2000]; longer turns are cut in the prompt too
 
 ETTIN17 = "cross-encoder/ettin-reranker-17m-v1"
 ARMS: Dict[str, Dict[str, Any]] = {
@@ -327,28 +337,86 @@ def _cost(usage: Dict[str, int]) -> float:
     return (usage.get("in", 0) - cached) * PRICE["in"] + cached * PRICE["cached"] + usage.get("out", 0) * PRICE["out"]
 
 
+class RateLimiter:
+    """Spaces request starts to stay under a provider's requests-per-minute limit (NIM free tier)."""
+
+    def __init__(self, rpm: float):
+        self.interval = 60.0 / rpm if rpm > 0 else 0.0
+        self.next = 0.0
+        self.lock = asyncio.Lock()
+
+    async def wait(self) -> None:
+        if not self.interval:
+            return
+        async with self.lock:
+            now = time.monotonic()
+            delay = self.next - now
+            self.next = max(now, self.next) + self.interval
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+
+LIMITER = RateLimiter(0)
+
+
+_NIM: Dict[str, Any] = {}
+
+
+def _nim_client():
+    """Direct OpenAI-compatible calls to NIM (exact control of the thinking switch)."""
+    if not _NIM:
+        import httpx
+        from dotenv import dotenv_values
+
+        env = {**dotenv_values(ROOT / ".env"), **os.environ}
+        _NIM["key"] = (env.get("NVIDIA_NIM_API_KEY") or env.get("NVIDIA_API_KEY") or "").strip()
+        _NIM["base"] = (env.get("NVIDIA_NIM_API_BASE") or "https://integrate.api.nvidia.com/v1").rstrip("/")
+        _NIM["http"] = httpx.AsyncClient(timeout=httpx.Timeout(240, connect=15))
+    return _NIM
+
+
+async def _complete(msgs, *, effort: str, max_tokens: int):
+    """One completion -> (text, usage). effort: "low" = think (answers), "minimal" = no thinking (judge)."""
+    if MODEL.startswith("nvidia_nim/"):
+        nim = _nim_client()
+        think = effort != "minimal"
+        r = await nim["http"].post(
+            f"{nim['base']}/chat/completions", headers={"Authorization": f"Bearer {nim['key']}"},
+            json={"model": MODEL.split("/", 1)[1], "messages": msgs, "temperature": 0,
+                  "max_tokens": max_tokens if not think else max(max_tokens, 2000),
+                  "chat_template_kwargs": {"enable_thinking": think}})
+        if r.status_code != 200:
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+        b = r.json()
+        msg, u = b["choices"][0]["message"], b.get("usage") or {}
+        return (msg.get("content") or "").strip(), {"in": int(u.get("prompt_tokens") or 0), "cached": 0,
+                                                    "out": int(u.get("completion_tokens") or 0), "reasoning": 0}
+    import litellm
+
+    resp = await litellm.acompletion(model=MODEL, messages=msgs, temperature=0, max_tokens=max_tokens,
+                                     reasoning_effort=effort, timeout=180)
+    u = resp.usage
+    ptd = getattr(u, "prompt_tokens_details", None)
+    ctd = getattr(u, "completion_tokens_details", None)
+    return (resp.choices[0].message.content or "").strip(), {
+        "in": int(u.prompt_tokens or 0), "cached": int(getattr(ptd, "cached_tokens", 0) or 0),
+        "out": int(u.completion_tokens or 0), "reasoning": int(getattr(ctd, "reasoning_tokens", 0) or 0)}
+
+
 async def llm_call(prompt: str, *, system: Optional[str], effort: str, max_tokens: int, stub: Optional[str]):
     if stub is not None:
         return stub, {"in": len(prompt) // 4, "cached": 0, "out": len(stub) // 4, "reasoning": 0}
-    import litellm
-
     msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
     last = None
     for attempt in range(4):
         try:
-            resp = await litellm.acompletion(model=MODEL, messages=msgs, temperature=0, max_tokens=max_tokens,
-                                             reasoning_effort=effort, timeout=180)
-            u = resp.usage
-            ptd = getattr(u, "prompt_tokens_details", None)
-            ctd = getattr(u, "completion_tokens_details", None)
-            usage = {"in": int(u.prompt_tokens or 0), "cached": int(getattr(ptd, "cached_tokens", 0) or 0),
-                     "out": int(u.completion_tokens or 0),
-                     "reasoning": int(getattr(ctd, "reasoning_tokens", 0) or 0)}
-            return (resp.choices[0].message.content or "").strip(), usage
+            await LIMITER.wait()
+            return await _complete(msgs, effort=effort, max_tokens=max_tokens)
         except Exception as e:  # noqa: BLE001 - provider errors vary
             last = e
             msg = str(e).lower()
-            if attempt < 3 and any(s in msg for s in ("429", "rate", "503", "500", "overloaded", "timeout")):
+            if attempt < 3 and any(x in msg for x in ("429", "rate", "503", "502", "500", "overloaded", "timeout",
+                                                       "timed out", "readtimeout")):
                 await asyncio.sleep(5 * 2**attempt)
                 continue
             break
@@ -404,8 +472,9 @@ async def judge(rec: Dict[str, Any], response: str, ledger: Ledger, stub: bool, 
         qtype = "temporal-reasoning" if rec["category"] == "temporal" else "single-session-user"
         jobs.append(("j_strict", lme_judge_prompt(qtype, rec["question"], rec["answer"], response), None,
                      parse_yes_no))
-        jobs.append(("j_lenient", mem0_judge_prompt(rec["question"], rec["answer"], response), MEM0_JUDGE_SYSTEM,
-                     parse_label))
+        if rec["arm"] in LENIENT_ARMS or rec["arm"].startswith("decoy:"):
+            jobs.append(("j_lenient", mem0_judge_prompt(rec["question"], rec["answer"], response),
+                         MEM0_JUDGE_SYSTEM, parse_label))
     for name, prompt, system, parse in jobs:
         stub_text = None
         if stub:
@@ -440,6 +509,8 @@ async def answer_one(rec: Dict[str, Any], ledger: Ledger, stub: bool, sem) -> Di
 
 
 async def cmd_answer(args) -> None:
+    global LIMITER
+    LIMITER = RateLimiter(args.rpm)
     run = Path(args.run)
     tag = "stub" if args.stub else "live"
     ledger = Ledger(run / f"ledger_{tag}.jsonl", args.cap)
@@ -503,6 +574,8 @@ def _perturb(gold: str, rng: random.Random) -> str:
 
 async def cmd_decoys(args) -> None:
     """Judge reliability (bar B6): gold must pass; shuffled, "don't know" and perturbed must fail."""
+    global LIMITER
+    LIMITER = RateLimiter(args.rpm)
     rng = random.Random(11)
     run = Path(args.run)
     run.mkdir(parents=True, exist_ok=True)
@@ -590,6 +663,7 @@ def main() -> None:
         p.add_argument("--stub", action="store_true", help="no API calls; deterministic fake answers and verdicts")
         p.add_argument("--cap", type=float, default=CAP_USD)
         p.add_argument("--concurrency", type=int, default=8)
+        p.add_argument("--rpm", type=float, default=35.0, help="request-per-minute ceiling (0 = none)")
         if name == "answer":
             p.add_argument("--arms", default="")
             p.add_argument("--split", default="")

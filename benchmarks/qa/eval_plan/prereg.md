@@ -1,7 +1,9 @@
 # Preregistration: end-to-end QA (LoCoMo + LongMemEval-S)
 
-**Version:** v1, written 2026-11-15, before any paid call. It freezes when the pilot starts; any later change is `prereg-v2.md`.
-**Budget unit:** USD (Gemini API list price).
+**Version:** v1.1, 2026-11-15, written before any model call. It freezes when the pilot starts; any later change is `prereg-v2.md`.
+- v1.1 changes from v1: the answer and judge model moved to NVIDIA NIM's free tier (owner's request), so cost is $0 and the budget is wall-clock time. J-lenient runs only on the comparison arms. An optional DeepSeek V4.1 Flash slice was added.
+
+**Budget unit:** wall-clock hours, on NIM's free tier ($0). A cap of $60 applies only if the paid fallback is ever approved.
 
 ## Bars
 
@@ -26,11 +28,17 @@
 - Per-category accuracy.
 - Mean input tokens per question.
 - p50 retrieval latency.
-- J-lenient on LoCoMo (Mem0 2026's unified judge), only to place us beside published numbers.
+- J-lenient on LoCoMo (Mem0 2026's unified judge), on arms A0, A3 and A4 only, to place us beside published numbers.
+- **C1, optional:** DeepSeek V4.1 Flash as answer model and judge, on the 99-question A0-LME subset, for arms A0 and A1. This places us beside billion-context's third-party LongMemEval-S evaluation, which used that model (full context 83.2%, BM25 56.4%). NIM serves it at about 1.4 calls/min, so it runs in the background (~5 h).
 
 ## Arms
 
-All arms share one answer model and one judge: `gemini-3-flash-preview`, temperature 0, thinking set low for answers and minimal for the judge.
+All arms share one answer model and one judge: `nvidia/nemotron-3.5-lightning-30b-a3b` on NVIDIA NIM (free tier), temperature 0.
+- **Answers** think (`chat_template_kwargs.enable_thinking=true`, up to 2,000 tokens).
+- **The judge** does not think.
+- **Measured:** about 2–5 s per call with thinking and 0.2 s without, 8 concurrent calls without errors.
+- **DeepSeek V4.1 Flash** answered correctly but queued at about 1.4 calls/min, which is why it is only used for C1.
+- **Paid fallback:** Gemini 3 Flash, only with the owner's approval and a new projection.
 
 **Ingestion** (memory arms only):
 - Memorable's real write pipeline, LLM-free (`MEMORABLE_LLM__DEFAULT_MODEL=none`). The fact layer is therefore empty: this measures turn and episode retrieval.
@@ -46,6 +54,8 @@ All arms share one answer model and one judge: `gemini-3-flash-preview`, tempera
 | A3 | `memorable#current` | Score fusion (leaf 1.0, BM25 0.5) + Ettin-17M rerank (depth 20, 128 tokens), top 10 turns + 3 episodes | LoCoMo $0.0028, LME $0.0022 |
 | A3w | `memorable#current-wide` | As A3 with top 40 turns, about 6–8k tokens (the budget Mem0 reports) | LoCoMo $0.0052, LME $0.0074 |
 | A4 | `memorable#finetuned` | A3 with each fine-tuned model (turn embedder, semantic embedder, reranker) substituted **only if it passed its retrieval bar** in [docs/retrieval_round2.md](../../../docs/retrieval_round2.md) §0. If none passed, A4 is dropped. Which models qualify is recorded here before the pilot. | as A3 |
+
+**Per-item cost:** $0 on NIM. The price column above is for the Gemini fallback only.
 
 **Industry protocols, not adopted here:** Mem0's 2026 harness feeds up to 200 memories and uses a LoCoMo-specific answer prompt ("all events occurred in 2022–2024"), with GPT-4o or GPT-5. We do not copy that. J-lenient only reproduces their judge, for comparison.
 
@@ -68,7 +78,7 @@ A decoy pass proves a judge or scorer bug, so the run stops.
 
 ## Stop rules
 
-- **Budget cap: $60.** The run stops when cumulative spend reaches $60.
+- **Budget cap: 14 hours of wall-clock time** for the full run at the measured request rate (or $60 if the paid fallback is approved). The run is resumable, so stopping loses nothing already answered.
 - **First quota, rate-limit-after-retries, or 5xx-after-retries error:** stop and report. No silent skips; a skipped item counts as an error.
 - **Judge below B6** on the decoys (dry run with the stub judge, then the real judge in the pilot): stop.
 - **Pilot:** stop if any arm's pilot items fail to parse, or the projection exceeds the cap.
