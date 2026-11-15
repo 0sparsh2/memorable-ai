@@ -1,8 +1,10 @@
 """
 Runtime scoping and concurrency primitives.
 
-- ``Scope``: (namespace, user_id, session_id) used by every read and write so one
-  user's memories can never be injected into another user's prompt.
+- ``Scope``: (namespace, user_id, session_id, agent_id) used by every read and write
+  so one user's memories can never be injected into another user's prompt.
+  ``user_id=None`` is the namespace's shared ``org`` tier; ``agent_id`` is an
+  attribute (which agent produced/asks), never an isolation boundary.
 - Context variables let callers set the active user/session once
   (``with engine.scope(user_id=...)``) instead of threading ids through every call.
 - ``suppressed()`` marks code paths where LLM calls must not be intercepted
@@ -36,6 +38,9 @@ _current_user: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
 _current_session: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "memorable_session_id", default=None
 )
+_current_agent: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "memorable_agent_id", default=None
+)
 _suppress: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "memorable_suppress_interception", default=False
 )
@@ -43,14 +48,23 @@ _suppress: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 @dataclass(frozen=True)
 class Scope:
-    """Who a memory belongs to. ``user_id=None`` means the shared/anonymous pool."""
+    """
+    Who a memory belongs to. ``user_id=None`` means the shared ``org`` tier.
+
+    ``agent_id`` is last so positional ``Scope(ns, user, session)`` calls keep working.
+    """
 
     namespace: Optional[str] = None
     user_id: Optional[str] = None
     session_id: Optional[str] = None
+    agent_id: Optional[str] = None
 
     def with_session(self, session_id: Optional[str]) -> "Scope":
         return replace(self, session_id=session_id)
+
+    @property
+    def tier(self) -> str:
+        return "org" if self.user_id is None else "user"
 
 
 def current_user() -> Optional[str]:
@@ -61,14 +75,23 @@ def current_session() -> Optional[str]:
     return _current_session.get()
 
 
+def current_agent() -> Optional[str]:
+    return _current_agent.get()
+
+
 @contextmanager
-def active_scope(user_id: Optional[str] = None, session_id: Optional[str] = None) -> Iterator[None]:
-    """Set the active user/session for intercepted calls in this context."""
+def active_scope(
+    user_id: Optional[str] = None, session_id: Optional[str] = None, agent_id: Optional[str] = None
+) -> Iterator[None]:
+    """Set the active user/session/agent for intercepted calls in this context."""
     tok_u = _current_user.set(user_id) if user_id is not None else None
     tok_s = _current_session.set(session_id) if session_id is not None else None
+    tok_a = _current_agent.set(agent_id) if agent_id is not None else None
     try:
         yield
     finally:
+        if tok_a is not None:
+            _current_agent.reset(tok_a)
         if tok_s is not None:
             _current_session.reset(tok_s)
         if tok_u is not None:

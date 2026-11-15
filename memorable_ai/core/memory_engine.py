@@ -36,6 +36,7 @@ from memorable_ai.core.scope import (
     BackgroundWorker,
     Scope,
     active_scope,
+    current_agent,
     current_session,
     current_user,
     run_sync,
@@ -277,9 +278,14 @@ class MemoryEngine:
     # ------------------------------------------------------------------ scope
 
     @contextmanager
-    def scope(self, user_id: Optional[str] = None, session_id: Optional[str] = None) -> Iterator["MemoryEngine"]:
-        """Attribute intercepted calls in this block to ``user_id`` / ``session_id``."""
-        with active_scope(user_id=user_id, session_id=session_id):
+    def scope(
+        self, user_id: Optional[str] = None, session_id: Optional[str] = None, agent_id: Optional[str] = None
+    ) -> Iterator["MemoryEngine"]:
+        """
+        Attribute intercepted calls in this block to ``user_id`` / ``session_id``.
+        ``agent_id`` tags what the agent produces (an attribute, not an isolation wall).
+        """
+        with active_scope(user_id=user_id, session_id=session_id, agent_id=agent_id):
             yield self
 
     def register_identity(self, alias: str, canonical_user_id: str, confidence: float = 1.0) -> None:
@@ -308,6 +314,7 @@ class MemoryEngine:
         hints = hints or {}
         uid = user_id or current_user() or hints.get("user_id")
         sid = session_id or current_session() or hints.get("session_id")
+        aid = current_agent() or hints.get("agent_id")
         if (uid is None or sid is None) and messages:
             for msg in messages:
                 md = msg.get("metadata") if isinstance(msg, dict) else None
@@ -317,7 +324,7 @@ class MemoryEngine:
         uid = self._canonical(uid)
         if sid is None:
             sid = self._derive_session_id(uid, messages or [])
-        return Scope(namespace=self.config.memory.namespace, user_id=uid, session_id=sid)
+        return Scope(namespace=self.config.memory.namespace, user_id=uid, session_id=sid, agent_id=aid)
 
     @staticmethod
     def _derive_session_id(user_id: Optional[str], messages: Sequence[Any]) -> str:
@@ -478,12 +485,13 @@ class MemoryEngine:
                 "type": memory_type,
                 "metadata": metadata,
                 "user_id": uid,
+                "agent_id": metadata.pop("agent_id", None) or current_agent(),
                 "session_id": user_id or uid,
                 "source": "manual",
                 "embedding": self._embedder.encode_list(content) if self._embedder else None,
                 "importance_score": metadata.pop("importance_score", 0.5),
             }
-            scope = Scope(namespace=self.config.memory.namespace, user_id=uid)
+            scope = Scope(namespace=self.config.memory.namespace, user_id=uid, agent_id=memory["agent_id"])
             if infer:
                 applied = await self._updater.apply_facts([memory], scope)
             else:

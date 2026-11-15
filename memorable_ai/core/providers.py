@@ -47,10 +47,13 @@ class Adapter:
         md = md if isinstance(md, dict) else {}
         user = md.get("user_id") or kwargs.get("user") or kwargs.get("safety_identifier")
         session = md.get("session_id") or md.get("conversation_id") or md.get("thread_id")
-        return {
+        hints = {
             "user_id": str(user) if _is_given(user) and user else None,
             "session_id": str(session) if session else None,
         }
+        if md.get("agent_id"):
+            hints["agent_id"] = str(md["agent_id"])
+        return hints
 
     def inject(self, kwargs: Dict[str, Any], context: str) -> Dict[str, Any]:
         raise NotImplementedError
@@ -118,7 +121,10 @@ class AnthropicAdapter(Adapter):
         md = kwargs.get("metadata")
         md = md if isinstance(md, dict) else {}
         user = md.get("user_id")
-        return {"user_id": str(user) if user else None, "session_id": None}
+        hints = {"user_id": str(user) if user else None, "session_id": None}
+        if md.get("agent_id"):
+            hints["agent_id"] = str(md["agent_id"])
+        return hints
 
     def inject(self, kwargs: Dict[str, Any], context: str) -> Dict[str, Any]:
         new = dict(kwargs)

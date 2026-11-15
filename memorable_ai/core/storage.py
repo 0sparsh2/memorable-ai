@@ -9,6 +9,8 @@ defined in :mod:`memorable_ai.core.models`. This module owns:
 - scoped CRUD for semantic memories, with version chains instead of in-place edits
 - search primitives used by retrieval: vector search, lexical search (SQLite FTS5
   or an in-process BM25 fallback), and order-preserving hydration with scope checks
+- the graph ``edges`` table (writes, invalidation, cascades, and the ``graph_epoch``
+  signal that tells in-process graph engines to rebuild after hard deletes)
 """
 
 import hashlib
@@ -27,12 +29,12 @@ from memorable_ai.core.errors import StorageError
 from memorable_ai.core.models import (  # noqa: F401  (re-exported for compatibility)
     Base,
     Conversation,
+    Edge,
     Entity,
     Episode,
     IdentityAlias,
+    MemorableMeta,
     Memory,
-    Mention,
-    Relation,
     SessionRecord,
     Turn,
 )
@@ -72,6 +74,15 @@ def normalize_text(text_value: str) -> str:
 
 def content_hash(text_value: str) -> str:
     return hashlib.sha256(normalize_text(text_value).encode("utf-8")).hexdigest()
+
+
+# Edge kinds that put a fact into the walkable graph (retired when the fact is invalidated).
+WALK_FACT_KINDS = ("about", "mentions")
+
+
+def _chunks(seq: Sequence[int], n: int):
+    for i in range(0, len(seq), n):
+        yield list(seq[i : i + n])
 
 
 def episode_search_text(ep: Episode) -> str:
@@ -170,6 +181,7 @@ class Storage:
                     ("source", "VARCHAR(32)"),
                     ("source_episode_id", "INTEGER"),
                     ("source_turn_ids", json_type),
+                    ("agent_id", "VARCHAR(255)"),
                 ]:
                     if col not in existing:
                         try:
@@ -194,6 +206,17 @@ class Storage:
                         except Exception as e:
                             conn.rollback()
                             logger.debug("Migration skip conversations.%s: %s", col, e)
+            for table in ("turns", "episodes", "sessions", "entities"):
+                if table not in tables:
+                    continue
+                cols = {c["name"] for c in insp.get_columns(table)}
+                if "agent_id" not in cols:
+                    try:
+                        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN agent_id VARCHAR(255)"))
+                        conn.commit()
+                    except Exception as e:
+                        conn.rollback()
+                        logger.debug("Migration skip %s.agent_id: %s", table, e)
             for stmt in (
                 "CREATE INDEX IF NOT EXISTS idx_memory_scope ON memories (namespace, user_id, invalidated_at)",
                 "CREATE INDEX IF NOT EXISTS ix_memories_content_hash ON memories (content_hash)",
@@ -205,6 +228,7 @@ class Storage:
                     conn.rollback()
                     logger.debug("Index skip: %s", e)
         self._backfill(added_user_col)
+        self._backfill_edges(tables)
         self._ensure_fts()
 
     def _backfill(self, added_user_col: bool) -> None:
@@ -221,6 +245,54 @@ class Storage:
         except Exception as e:
             session.rollback()
             logger.debug("Backfill skipped: %s", e)
+        finally:
+            session.close()
+
+    def _backfill_edges(self, tables: set) -> None:
+        """
+        One-time copy of pre-v0.3 graph tables (``relations``, ``mentions``) and fact
+        provenance columns into ``edges``. Legacy tables are left in place, untouched.
+        """
+        session = self.get_session()
+        try:
+            if session.query(Edge.id).first() is not None:
+                return
+            copied = 0
+            if "relations" in tables:
+                copied += session.execute(text(
+                    "INSERT INTO edges (namespace, user_id, src_kind, src_id, kind, dst_kind, dst_id, predicate,"
+                    " weight, confidence, valid_from, valid_to, created_at, invalidated_at, evidence_kind, evidence_id)"
+                    " SELECT namespace, user_id, 'entity', subject_id, 'relates', 'entity', object_id, predicate,"
+                    " 1.0, confidence, valid_from, valid_to, created_at, invalidated_at,"
+                    " CASE WHEN memory_id IS NULL THEN NULL ELSE 'fact' END, memory_id FROM relations"
+                )).rowcount or 0
+            if "mentions" in tables:
+                for col, src_kind, kind in (("memory_id", "fact", "about"), ("episode_id", "episode", "mentions"),
+                                            ("turn_id", "turn", "mentions")):
+                    copied += session.execute(text(
+                        "INSERT INTO edges (namespace, user_id, src_kind, src_id, kind, dst_kind, dst_id, weight,"
+                        f" confidence, created_at) SELECT e.namespace, e.user_id, '{src_kind}', m.{col}, '{kind}',"
+                        f" 'entity', m.entity_id, 1.0, 1.0, m.created_at FROM mentions m"
+                        f" JOIN entities e ON e.id = m.entity_id WHERE m.{col} IS NOT NULL"
+                    )).rowcount or 0
+            prov = (
+                session.query(Memory)
+                .filter(or_(Memory.source_episode_id.isnot(None), Memory.source_turn_ids.isnot(None)))
+                .limit(200000)
+                .all()
+            )
+            for m in prov:
+                edges = self._provenance_edges(m.id, m.namespace, m.user_id, m.agent_id,
+                                               m.source_episode_id, m.source_turn_ids)
+                if edges:
+                    self.add_edges(edges, session=session)
+                    copied += len(edges)
+            if copied:
+                session.commit()
+                logger.info("Backfilled %d graph edges from legacy tables", copied)
+        except Exception as e:
+            session.rollback()
+            logger.debug("Edge backfill skipped: %s", e)
         finally:
             session.close()
 
@@ -539,6 +611,7 @@ class Storage:
         if user_id is None:
             user_id = meta.get("canonical_user_id")
         session_id = data.get("session_id") or meta.get("session_id")
+        agent_id = data.get("agent_id") or meta.get("agent_id")
         chash = content_hash(content)
         now = utcnow()
 
@@ -567,6 +640,7 @@ class Storage:
                 memory_type=memory_type,
                 namespace=namespace,
                 user_id=user_id,
+                agent_id=agent_id,
                 session_id=session_id or user_id,
                 extra_metadata=meta,
                 embedding=embedding,
@@ -585,6 +659,17 @@ class Storage:
             session.add(memory)
             session.flush()
             self.fts_insert(session, "fact", memory.id, content)
+            edges = self._provenance_edges(
+                memory.id, namespace, user_id, agent_id,
+                data.get("source_episode_id"), data.get("source_turn_ids"),
+            )
+            if data.get("supersedes_id"):
+                edges.append(self._edge_dict(
+                    "fact", memory.id, "supersedes", "fact", int(data["supersedes_id"]),
+                    namespace=namespace, user_id=user_id, agent_id=agent_id,
+                ))
+            if edges:
+                self.add_edges(edges, session=session)
             session.commit()
             self.index_add("fact", memory.id, user_id, content, embedding)
             return memory.id, "add"
@@ -648,6 +733,10 @@ class Storage:
                 meta["invalidation_reason"] = reason
                 memory.extra_metadata = meta
             self.fts_delete(session, "fact", memory_id)
+            # The fact leaves the walkable graph; provenance edges (derived_from,
+            # supersedes) stay valid as history.
+            self.invalidate_edges(session, node=("fact", memory_id), kinds=WALK_FACT_KINDS, at=now)
+            self.invalidate_edges(session, evidence=("fact", memory_id), at=now)
             session.commit()
             self.index_remove("fact", memory_id)
             return True
@@ -718,8 +807,7 @@ class Storage:
             if memory is None:
                 return False
             self.fts_delete(session, "fact", memory_id)
-            session.query(Mention).filter(Mention.memory_id == memory_id).delete()
-            session.query(Relation).filter(Relation.memory_id == memory_id).delete()
+            self.delete_node_edges(session, "fact", memory_id)
             session.delete(memory)
             session.commit()
             self.index_remove("fact", memory_id)
@@ -805,15 +893,21 @@ class Storage:
             for kind, ids in (("fact", mem_ids), ("episode", ep_ids), ("turn", turn_ids)):
                 for rid in ids:
                     self.fts_delete(session, kind, rid)
-            if ent_ids:
-                session.query(Mention).filter(Mention.entity_id.in_(ent_ids)).delete(
-                    synchronize_session=False
-                )
-            counts["relations"] = (
-                self._ns_filter(session.query(Relation), Relation)
-                .filter(Relation.user_id == user_id)
+            counts["edges"] = (
+                self._ns_filter(session.query(Edge), Edge)
+                .filter(Edge.user_id == user_id)
                 .delete(synchronize_session=False)
             )
+            # Edges stored in the org tier that point at this user's rows
+            for kind, ids in (("fact", mem_ids), ("episode", ep_ids), ("turn", turn_ids), ("entity", ent_ids)):
+                for chunk in _chunks(ids, 500):
+                    session.query(Edge).filter(
+                        or_(
+                            (Edge.src_kind == kind) & Edge.src_id.in_(chunk),
+                            (Edge.dst_kind == kind) & Edge.dst_id.in_(chunk),
+                        )
+                    ).delete(synchronize_session=False)
+            self.bump_graph_epoch(session)
             for name, model, ids in (
                 ("entities", Entity, ent_ids),
                 ("memories", Memory, mem_ids),
@@ -839,6 +933,257 @@ class Storage:
         except Exception as e:
             session.rollback()
             raise StorageError(f"forget_user failed: {e}") from e
+        finally:
+            session.close()
+
+    # ------------------------------------------------------------------ graph edges
+
+    def _edge_dict(
+        self, src_kind: str, src_id: int, kind: str, dst_kind: str, dst_id: int, **attrs: Any
+    ) -> Dict[str, Any]:
+        return {"src_kind": src_kind, "src_id": int(src_id), "kind": kind,
+                "dst_kind": dst_kind, "dst_id": int(dst_id), **attrs}
+
+    def _provenance_edges(
+        self,
+        fact_id: int,
+        namespace: Optional[str],
+        user_id: Optional[str],
+        agent_id: Optional[str],
+        episode_id: Optional[int],
+        turn_ids: Optional[Sequence[int]],
+    ) -> List[Dict[str, Any]]:
+        """``fact -derived_from-> turn/episode`` edges for a fact's recorded sources."""
+        out: List[Dict[str, Any]] = []
+        attrs = {"namespace": namespace, "user_id": user_id, "agent_id": agent_id}
+        for tid in dict.fromkeys(int(t) for t in (turn_ids or []) if t is not None):
+            out.append(self._edge_dict("fact", fact_id, "derived_from", "turn", tid, **attrs))
+        if episode_id:
+            out.append(self._edge_dict("fact", fact_id, "derived_from", "episode", int(episode_id), **attrs))
+        return out
+
+    def add_edges(self, edges: Sequence[Dict[str, Any]], session: Optional[Session] = None) -> List[int]:
+        """Insert edges (dicts with src_kind/src_id/kind/dst_kind/dst_id + attributes)."""
+        if not edges:
+            return []
+        own = session is None
+        session = session or self.get_session()
+        try:
+            now = utcnow()
+            rows = [
+                Edge(
+                    namespace=self.namespace or e.get("namespace"),
+                    user_id=e.get("user_id"),
+                    agent_id=e.get("agent_id"),
+                    src_kind=e["src_kind"],
+                    src_id=int(e["src_id"]),
+                    kind=e["kind"],
+                    dst_kind=e["dst_kind"],
+                    dst_id=int(e["dst_id"]),
+                    predicate=e.get("predicate"),
+                    role=e.get("role"),
+                    weight=float(e.get("weight", 1.0)),
+                    confidence=float(e.get("confidence", 1.0)),
+                    valid_from=e.get("valid_from"),
+                    valid_to=e.get("valid_to"),
+                    created_at=now,
+                    evidence_kind=e.get("evidence_kind"),
+                    evidence_id=e.get("evidence_id"),
+                    source=e.get("source"),
+                    trust_tier=e.get("trust_tier"),
+                    extra=e.get("extra"),
+                )
+                for e in edges
+            ]
+            session.add_all(rows)
+            session.flush()
+            ids = [r.id for r in rows]
+            if own:
+                session.commit()
+            return ids
+        except Exception:
+            if own:
+                session.rollback()
+            raise
+        finally:
+            if own:
+                session.close()
+
+    @staticmethod
+    def _node_clause(kind: str, node_id: int):
+        return or_(
+            (Edge.src_kind == kind) & (Edge.src_id == node_id),
+            (Edge.dst_kind == kind) & (Edge.dst_id == node_id),
+        )
+
+    def invalidate_edges(
+        self,
+        session: Optional[Session] = None,
+        *,
+        ids: Optional[Sequence[int]] = None,
+        node: Optional[Tuple[str, int]] = None,
+        evidence: Optional[Tuple[str, int]] = None,
+        kinds: Optional[Sequence[str]] = None,
+        at: Optional[datetime] = None,
+        superseded_by: Optional[int] = None,
+    ) -> List[int]:
+        """Retire matching valid edges (transaction time); returns their ids."""
+        if ids is None and node is None and evidence is None:
+            raise ValueError("invalidate_edges needs ids, node or evidence")
+        own = session is None
+        session = session or self.get_session()
+        try:
+            q = session.query(Edge).filter(Edge.invalidated_at.is_(None))
+            if ids is not None:
+                q = q.filter(Edge.id.in_(list(ids)))
+            if node is not None:
+                q = q.filter(self._node_clause(node[0], int(node[1])))
+            if evidence is not None:
+                q = q.filter(Edge.evidence_kind == evidence[0], Edge.evidence_id == int(evidence[1]))
+            if kinds:
+                q = q.filter(Edge.kind.in_(list(kinds)))
+            now = at or utcnow()
+            out = []
+            for e in q.all():
+                e.invalidated_at = now
+                e.valid_to = e.valid_to or now
+                if superseded_by:
+                    e.superseded_by_id = superseded_by
+                out.append(e.id)
+            if own:
+                session.commit()
+            return out
+        except Exception:
+            if own:
+                session.rollback()
+            raise
+        finally:
+            if own:
+                session.close()
+
+    def delete_node_edges(self, session: Session, kind: str, node_id: int) -> int:
+        """Hard-delete every edge touching a node or asserted by it; bumps ``graph_epoch``."""
+        n = (
+            session.query(Edge)
+            .filter(or_(self._node_clause(kind, node_id),
+                        (Edge.evidence_kind == kind) & (Edge.evidence_id == node_id)))
+            .delete(synchronize_session=False)
+        )
+        if n:
+            self.bump_graph_epoch(session)
+        return n
+
+    def unsupported_dependents(
+        self, kind: str, node_id: int, session: Optional[Session] = None
+    ) -> List[Tuple[str, int]]:
+        """
+        Rows derived from ``(kind, node_id)`` that have no *other* valid source.
+        Deleting the node should cascade to these (Zep rule: a derived memory survives
+        only while some evidence supports it).
+        """
+        own = session is None
+        session = session or self.get_session()
+        try:
+            deps = (
+                session.query(Edge.src_kind, Edge.src_id)
+                .filter(Edge.kind == "derived_from", Edge.dst_kind == kind, Edge.dst_id == node_id,
+                        Edge.invalidated_at.is_(None))
+                .distinct()
+                .all()
+            )
+            out: List[Tuple[str, int]] = []
+            for sk, sid in deps:
+                other = (
+                    session.query(Edge.id)
+                    .filter(Edge.kind == "derived_from", Edge.src_kind == sk, Edge.src_id == sid,
+                            Edge.invalidated_at.is_(None),
+                            ~((Edge.dst_kind == kind) & (Edge.dst_id == node_id)))
+                    .first()
+                )
+                if other is None:
+                    out.append((sk, int(sid)))
+            return out
+        finally:
+            if own:
+                session.close()
+
+    def graph_epoch(self) -> int:
+        session = self.get_session()
+        try:
+            row = session.get(MemorableMeta, "graph_epoch")
+            return int(row.value) if row is not None and row.value else 0
+        finally:
+            session.close()
+
+    def bump_graph_epoch(self, session: Session) -> None:
+        row = session.get(MemorableMeta, "graph_epoch")
+        if row is None:
+            session.add(MemorableMeta(key="graph_epoch", value="1"))
+        else:
+            row.value = str(int(row.value or 0) + 1)
+
+    def graph_state(self) -> Tuple[int, int, Optional[datetime]]:
+        """
+        ``(graph_epoch, max edge id, newest invalidated_at)`` for the whole table.
+        All three are index lookups, so graph engines can skip delta queries when
+        nothing changed.
+        """
+        from sqlalchemy import func
+
+        session = self.get_session()
+        try:
+            row = session.get(MemorableMeta, "graph_epoch")
+            epoch = int(row.value) if row is not None and row.value else 0
+            max_id = session.query(func.max(Edge.id)).scalar() or 0
+            max_inv = session.query(func.max(Edge.invalidated_at)).scalar()
+            return epoch, int(max_id), max_inv
+        finally:
+            session.close()
+
+    def edges_after(
+        self, namespace: Optional[str], user_id: Optional[str], after_id: int
+    ) -> List[Tuple[int, str, int, str, str, int, float]]:
+        """Valid edges of one tier partition with id > ``after_id`` (graph-engine sync)."""
+        session = self.get_session()
+        try:
+            q = session.query(Edge.id, Edge.src_kind, Edge.src_id, Edge.kind, Edge.dst_kind, Edge.dst_id,
+                              Edge.weight).filter(Edge.id > after_id, Edge.invalidated_at.is_(None))
+            if namespace:
+                q = q.filter(Edge.namespace == namespace)
+            q = q.filter(Edge.user_id == user_id) if user_id is not None else q.filter(Edge.user_id.is_(None))
+            return [tuple(r) for r in q.order_by(Edge.id).all()]
+        finally:
+            session.close()
+
+    def max_edge_invalidated_at(self, namespace: Optional[str], user_id: Optional[str]) -> Optional[datetime]:
+        """Newest ``invalidated_at`` in a partition (sync starting point)."""
+        from sqlalchemy import func
+
+        session = self.get_session()
+        try:
+            q = session.query(func.max(Edge.invalidated_at))
+            if namespace:
+                q = q.filter(Edge.namespace == namespace)
+            q = q.filter(Edge.user_id == user_id) if user_id is not None else q.filter(Edge.user_id.is_(None))
+            return q.scalar()
+        finally:
+            session.close()
+
+    def edge_invalidations_since(
+        self, namespace: Optional[str], user_id: Optional[str], since: Optional[datetime], max_id: int
+    ) -> List[Tuple[int, datetime]]:
+        """Edges (id <= max_id) of a partition invalidated at or after ``since``."""
+        session = self.get_session()
+        try:
+            q = session.query(Edge.id, Edge.invalidated_at).filter(
+                Edge.invalidated_at.isnot(None), Edge.id <= max_id
+            )
+            if since is not None:
+                q = q.filter(Edge.invalidated_at >= since)
+            if namespace:
+                q = q.filter(Edge.namespace == namespace)
+            q = q.filter(Edge.user_id == user_id) if user_id is not None else q.filter(Edge.user_id.is_(None))
+            return [tuple(r) for r in q.all()]
         finally:
             session.close()
 
@@ -1077,6 +1422,7 @@ class Storage:
             "confidence": m.confidence,
             "session_id": m.session_id,
             "user_id": m.user_id,
+            "agent_id": getattr(m, "agent_id", None),
             "source": m.source,
             "source_episode_id": m.source_episode_id,
             "source_turn_ids": m.source_turn_ids,
@@ -1089,6 +1435,7 @@ class Storage:
             "id": e.id,
             "session_id": e.session_id,
             "user_id": e.user_id,
+            "agent_id": getattr(e, "agent_id", None),
             "status": e.status,
             "title": e.title,
             "summary": e.summary,
@@ -1109,6 +1456,7 @@ class Storage:
             "id": t.id,
             "session_id": t.session_id,
             "user_id": t.user_id,
+            "agent_id": getattr(t, "agent_id", None),
             "seq": t.seq,
             "role": t.role,
             "content": t.content,
@@ -1129,9 +1477,10 @@ class Storage:
                 "turns": self._ns_filter(session.query(Turn), Turn).count(),
                 "sessions": self._ns_filter(session.query(SessionRecord), SessionRecord).count(),
                 "entities": self._ns_filter(session.query(Entity), Entity).count(),
-                "relations": self._ns_filter(session.query(Relation), Relation)
-                .filter(Relation.invalidated_at.is_(None))
+                "relations": self._ns_filter(session.query(Edge), Edge)
+                .filter(Edge.kind == "relates", Edge.invalidated_at.is_(None))
                 .count(),
+                "edges": self._ns_filter(session.query(Edge), Edge).filter(Edge.invalidated_at.is_(None)).count(),
                 "namespace": self.namespace,
                 "fts": self._fts_enabled,
             }

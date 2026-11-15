@@ -254,7 +254,22 @@ class EpisodicMemory:
         result = IngestResult()
         session = self.storage.get_session()
         added: List[Tuple[Turn, Optional[np.ndarray]]] = []
+        edge_attrs = {"namespace": self.storage.namespace, "user_id": scope.user_id, "agent_id": scope.agent_id}
+        edges: List[Dict[str, Any]] = []
         try:
+            rec = self._session_query(session, SessionRecord, scope).first()
+            if rec is None:
+                rec = SessionRecord(
+                    namespace=self.storage.namespace,
+                    session_id=scope.session_id,
+                    user_id=scope.user_id,
+                    agent_id=scope.agent_id,
+                    started_at=new[0]["occurred_at"],
+                    last_active_at=new[-1]["occurred_at"],
+                    turn_count=0,
+                )
+                session.add(rec)
+                session.flush()
             last = self._session_query(session, Turn, scope).order_by(Turn.seq.desc()).first()
             seq = (last.seq if last else -1) + 1
             ep = (
@@ -278,12 +293,16 @@ class EpisodicMemory:
                 prev_vec = vec
                 reason = self._boundary(ep, t, vec) if ep is not None else None
                 if ep is None or reason:
+                    prev_ep = ep
                     if ep is not None:
                         self._mark_closed(ep, t["occurred_at"])
                         result.closed_episode_ids.append(ep.id)
+                    elif last is not None and last.episode_id:
+                        prev_ep = session.query(Episode).filter(Episode.id == last.episode_id).first()
                     ep = Episode(
                         namespace=self.storage.namespace,
                         user_id=scope.user_id,
+                        agent_id=scope.agent_id,
                         session_id=scope.session_id,
                         status="open",
                         start_seq=seq,
@@ -294,9 +313,14 @@ class EpisodicMemory:
                     )
                     session.add(ep)
                     session.flush()
+                    # Episodic subgraph: episode -part_of-> session, previous -next-> episode
+                    edges.append(self.storage._edge_dict("episode", ep.id, "part_of", "session", rec.id, **edge_attrs))
+                    if prev_ep is not None:
+                        edges.append(self.storage._edge_dict("episode", prev_ep.id, "next", "episode", ep.id, **edge_attrs))
                 row = Turn(
                     namespace=self.storage.namespace,
                     user_id=scope.user_id,
+                    agent_id=scope.agent_id,
                     session_id=scope.session_id,
                     seq=seq,
                     role=t["role"],
@@ -309,6 +333,7 @@ class EpisodicMemory:
                 )
                 session.add(row)
                 session.flush()
+                edges.append(self.storage._edge_dict("turn", row.id, "part_of", "episode", ep.id, **edge_attrs))
                 if self.cfg.index_turns:
                     self.storage.fts_insert(session, "turn", row.id, row.content)
                 self._update_stats(ep, t, vec)
@@ -318,24 +343,11 @@ class EpisodicMemory:
                 added.append((row, index_vec))
                 seq += 1
             result.open_episode_id = ep.id if ep is not None else None
-            rec = (
-                self._session_query(session, SessionRecord, scope).first()
-            )
-            if rec is None:
-                session.add(
-                    SessionRecord(
-                        namespace=self.storage.namespace,
-                        session_id=scope.session_id,
-                        user_id=scope.user_id,
-                        started_at=new[0]["occurred_at"],
-                        last_active_at=new[-1]["occurred_at"],
-                        turn_count=len(new),
-                    )
-                )
-            else:
-                rec.last_active_at = new[-1]["occurred_at"]
-                rec.turn_count = (rec.turn_count or 0) + len(new)
-                rec.ended_at = None
+            rec.last_active_at = new[-1]["occurred_at"]
+            rec.turn_count = (rec.turn_count or 0) + len(new)
+            rec.ended_at = None
+            if edges:
+                self.storage.add_edges(edges, session=session)
             session.commit()
         except Exception:
             session.rollback()
@@ -461,7 +473,8 @@ class EpisodicMemory:
             self.knowledge_graph.ingest_episode(
                 episode_id,
                 entities,
-                Scope(namespace=self.storage.namespace, user_id=ep_dict["user_id"], session_id=ep_dict["session_id"]),
+                Scope(namespace=self.storage.namespace, user_id=ep_dict["user_id"], session_id=ep_dict["session_id"],
+                      agent_id=ep_dict.get("agent_id")),
             )
         return ep_dict
 

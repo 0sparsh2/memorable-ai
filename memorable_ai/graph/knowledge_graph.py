@@ -1,25 +1,25 @@
 """
-Persistent knowledge graph in SQL.
+Knowledge graph over the unified ``edges`` table (docs/memory_graph_design.md).
 
-Nodes are ``entities`` (per namespace and user). Edges are ``relations``
-(subject, predicate, object) with bi-temporal validity and a pointer to the fact
-that asserted them. ``mentions`` link entities to the facts and episodes that
-mention them, so facts are also graph nodes. This is the "passage node" idea
-from HippoRAG 2 (Gutiérrez et al., 2025).
+Nodes are rows addressed as ``(kind, id)``: ``entity`` rows (per namespace and
+user), ``fact`` rows (memories), ``episode`` and ``turn`` rows. This module writes:
 
-Write side:
-  * entities/relations come from the LLM extractor when available, otherwise
-    from conservative patterns over normalised facts ("User lives in Berlin")
-  * single-valued predicates (lives_in, works_at, ...) invalidate the previous
-    edge for the same subject, as in Graphiti/Zep. The superseded fact ids are
-    returned so the write pipeline can retire the stale facts too.
+  * ``relates``  entity -> entity, with ``predicate``, bi-temporal validity, and
+    ``evidence`` -> the fact that asserted it
+  * ``about``    fact -> entity (role subject / object / mention), so facts are
+    graph nodes too (the HippoRAG 2 "passage node" idea)
+  * ``mentions`` episode -> entity
 
-Read side (``ppr``): seed entities matched in the query (n-grams, plus
-predicate words on the user's own edges, so "my sister" reaches "Emma"),
-expand two hops over relations and mentions, and run Personalized PageRank.
-Facts are ranked by their stationary probability. This is what makes multi-hop
-questions ("where does my sister live?") answerable when no single fact
-contains every query term.
+Single-valued predicates (lives_in, works_at, ...) invalidate the previous edge
+for the same subject, as in Graphiti/Zep. The superseded fact ids are returned so
+the write pipeline can retire the stale facts too.
+
+Read side (``ppr``): seed entities matched in the query (n-grams, plus predicate
+words on the user's own edges, so "my sister" reaches "Emma"), then run
+Personalized PageRank on the in-process sparse-matrix ``GraphEngine`` over the
+whole partition, with no hop caps. Facts are ranked by their stationary
+probability. The user's own "self" node is a hub, so it is excluded from the walk
+exactly.
 """
 
 from __future__ import annotations
@@ -29,9 +29,10 @@ import re
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from memorable_ai.core.models import Entity, Memory, Mention, Relation
+from memorable_ai.core.models import Edge, Entity
 from memorable_ai.core.scope import Scope
 from memorable_ai.core.vector_index import STOPWORDS, light_stem
+from memorable_ai.graph.engine import GraphEngine
 
 from memorable_ai.core.models import utcnow  # noqa: E402
 
@@ -110,9 +111,15 @@ def _clean_obj(o: str) -> str:
 class KnowledgeGraph:
     """SQL-backed entity/relation graph with Personalized PageRank retrieval."""
 
-    def __init__(self, storage: Any, functional_predicates: Optional[Iterable[str]] = None):
+    def __init__(
+        self,
+        storage: Any,
+        functional_predicates: Optional[Iterable[str]] = None,
+        engine: Optional[GraphEngine] = None,
+    ):
         self.storage = storage
         self.functional = set(functional_predicates or FUNCTIONAL_PREDICATES)
+        self.engine = engine or GraphEngine(storage)
 
     # ------------------------------------------------------------------ extraction
 
@@ -183,6 +190,7 @@ class KnowledgeGraph:
             ent = Entity(
                 namespace=scope.namespace,
                 user_id=scope.user_id,
+                agent_id=scope.agent_id,
                 name=name[:255],
                 norm_name=norm[:255],
                 entity_type=entity_type or "concept",
@@ -198,6 +206,15 @@ class KnowledgeGraph:
             if ent.entity_type == "concept" and entity_type not in (None, "", "concept"):
                 ent.entity_type = entity_type
         return ent
+
+    def _edge(self, scope: Scope, src: Tuple[str, int], kind: str, dst: Tuple[str, int], **attrs: Any) -> Edge:
+        return Edge(
+            namespace=self.storage.namespace or scope.namespace,
+            user_id=scope.user_id,
+            agent_id=scope.agent_id,
+            src_kind=src[0], src_id=int(src[1]), kind=kind, dst_kind=dst[0], dst_id=int(dst[1]),
+            weight=1.0, confidence=1.0, created_at=attrs.pop("created_at", utcnow()), **attrs,
+        )
 
     def ingest_memory(self, memory: Dict[str, Any], scope: Scope) -> List[int]:
         """
@@ -216,13 +233,24 @@ class KnowledgeGraph:
             h_ents, h_rels = self.extract(content)
             entities = list(entities or []) or h_ents
             relations = list(relations or []) or h_rels
+        scope = Scope(scope.namespace, scope.user_id, scope.session_id,
+                      scope.agent_id or memory.get("agent_id"))
 
         superseded_facts: List[int] = []
         session = self.storage.get_session()
         try:
             now = utcnow()
-            linked: Set[int] = set()
+            valid_from = memory.get("valid_from") if isinstance(memory.get("valid_from"), datetime) else now
+            about: Dict[int, str] = {}  # entity id -> role
             by_norm: Dict[str, Entity] = {}
+
+            def link(ent: Entity, role: str) -> None:
+                if ent.id not in about:
+                    ent.mention_count = (ent.mention_count or 0) + (0 if ent.is_self else 1)
+                    about[ent.id] = role
+                elif role != "mention" and about[ent.id] == "mention":
+                    about[ent.id] = role
+
             for e in entities:
                 name = e.get("name") if isinstance(e, dict) else str(e)
                 etype = e.get("type", "concept") if isinstance(e, dict) else "concept"
@@ -230,10 +258,8 @@ class KnowledgeGraph:
                 if ent is None:
                     continue
                 by_norm[ent.norm_name] = ent
-                if not ent.is_self and ent.id not in linked:
-                    session.add(Mention(entity_id=ent.id, memory_id=mid))
-                    ent.mention_count = (ent.mention_count or 0) + 1
-                    linked.add(ent.id)
+                link(ent, "mention")
+            new_edges: List[Edge] = []
             for subj, pred, obj in relations:
                 pred = re.sub(r"[^a-z0-9_]+", "_", str(pred).strip().lower()).strip("_")[:100]
                 if not pred:
@@ -242,42 +268,39 @@ class KnowledgeGraph:
                 o_ent = by_norm.get(normalize_entity(obj)) or self._get_or_create_entity(session, scope, obj, "concept", now)
                 if s_ent is None or o_ent is None or s_ent.id == o_ent.id:
                     continue
-                for ent in (s_ent, o_ent):
-                    if not ent.is_self and ent.id not in linked:
-                        session.add(Mention(entity_id=ent.id, memory_id=mid))
-                        ent.mention_count = (ent.mention_count or 0) + 1
-                        linked.add(ent.id)
+                link(s_ent, "subject")
+                link(o_ent, "object")
                 existing = (
-                    session.query(Relation)
+                    session.query(Edge)
                     .filter(
-                        Relation.subject_id == s_ent.id,
-                        Relation.predicate == pred,
-                        Relation.invalidated_at.is_(None),
+                        Edge.kind == "relates",
+                        Edge.src_kind == "entity",
+                        Edge.src_id == s_ent.id,
+                        Edge.predicate == pred,
+                        Edge.invalidated_at.is_(None),
                     )
                     .all()
                 )
-                if any(r.object_id == o_ent.id for r in existing):
+                if any(r.dst_id == o_ent.id for r in existing):
                     continue  # same edge already asserted
-                rel = Relation(
-                    namespace=scope.namespace,
-                    user_id=scope.user_id,
-                    subject_id=s_ent.id,
-                    predicate=pred,
-                    object_id=o_ent.id,
-                    memory_id=mid,
-                    episode_id=memory.get("source_episode_id"),
-                    valid_from=now,
-                    created_at=now,
+                rel = self._edge(
+                    scope, ("entity", s_ent.id), "relates", ("entity", o_ent.id),
+                    predicate=pred, valid_from=valid_from, created_at=now,
+                    evidence_kind="fact", evidence_id=int(mid),
                 )
                 session.add(rel)
                 session.flush()
                 if pred in self.functional:
                     for old in existing:
                         old.invalidated_at = now
-                        old.valid_to = now
+                        old.valid_to = valid_from
                         old.superseded_by_id = rel.id
-                        if old.memory_id and old.memory_id != mid:
-                            superseded_facts.append(old.memory_id)
+                        if old.evidence_kind == "fact" and old.evidence_id and old.evidence_id != mid:
+                            superseded_facts.append(int(old.evidence_id))
+            for eid, role in about.items():
+                new_edges.append(self._edge(scope, ("fact", int(mid)), "about", ("entity", eid),
+                                            role=role, valid_from=valid_from, created_at=now))
+            session.add_all(new_edges)
             session.commit()
         except Exception as e:
             session.rollback()
@@ -299,7 +322,7 @@ class KnowledgeGraph:
                 if ent is None or ent.is_self or ent.id in seen:
                     continue
                 seen.add(ent.id)
-                session.add(Mention(entity_id=ent.id, episode_id=episode_id))
+                session.add(self._edge(scope, ("episode", int(episode_id)), "mentions", ("entity", ent.id)))
                 ent.mention_count = (ent.mention_count or 0) + 1
             session.commit()
         except Exception as e:
@@ -309,23 +332,11 @@ class KnowledgeGraph:
             session.close()
 
     def invalidate_memory(self, memory_id: int) -> None:
-        """Retire edges asserted by a fact that is no longer valid."""
-        session = self.storage.get_session()
+        """Retire the relations asserted by a fact that is no longer valid."""
         try:
-            now = utcnow()
-            for rel in (
-                session.query(Relation)
-                .filter(Relation.memory_id == memory_id, Relation.invalidated_at.is_(None))
-                .all()
-            ):
-                rel.invalidated_at = now
-                rel.valid_to = now
-            session.commit()
+            self.storage.invalidate_edges(evidence=("fact", int(memory_id)), kinds=("relates",))
         except Exception as e:
-            session.rollback()
             logger.debug("Relation invalidation failed: %s", e)
-        finally:
-            session.close()
 
     # ------------------------------------------------------------------ reads
 
@@ -366,8 +377,13 @@ class KnowledgeGraph:
                 self_ids = [r[0] for r in self_q.all()]
                 if self_ids:
                     rels = (
-                        session.query(Relation.predicate, Relation.object_id)
-                        .filter(Relation.subject_id.in_(self_ids), Relation.invalidated_at.is_(None))
+                        session.query(Edge.predicate, Edge.dst_id)
+                        .filter(
+                            Edge.kind == "relates",
+                            Edge.src_kind == "entity",
+                            Edge.src_id.in_(self_ids),
+                            Edge.invalidated_at.is_(None),
+                        )
                         .all()
                     )
                     for pred, obj_id in rels:
@@ -385,83 +401,48 @@ class KnowledgeGraph:
         k: int = 20,
         seed_memory_ids: Sequence[int] = (),
         include_shared: bool = False,
-        alpha: float = 0.85,
-        hops: int = 2,
-        max_nodes: int = 4000,
+        weights: Optional[Dict[str, float]] = None,
     ) -> List[Tuple[int, float]]:
         """Rank facts by Personalized PageRank from query-matched entities."""
-        import networkx as nx
-
-        seeds = self.match_query_entities(query, scope, include_shared)
-        session = self.storage.get_session()
         try:
-            if seed_memory_ids:
-                for (eid,) in (
-                    session.query(Mention.entity_id).filter(Mention.memory_id.in_(list(seed_memory_ids))).all()
-                ):
-                    seeds[eid] = max(seeds.get(eid, 0.0), 0.3)
-            if not seeds:
-                return []
-            self_ids = {
-                r[0]
-                for r in self._scoped(session.query(Entity.id).filter(Entity.is_self == 1), Entity, scope, include_shared).all()
-            }
-            G = nx.Graph()
-            frontier: Set[int] = {e for e in seeds if e not in self_ids}
-            visited: Set[int] = set()
-            for _ in range(hops):
-                if not frontier or G.number_of_nodes() > max_nodes:
-                    break
-                visited |= frontier
-                nxt: Set[int] = set()
-                rels = (
-                    session.query(Relation.subject_id, Relation.object_id)
-                    .filter(
-                        Relation.invalidated_at.is_(None),
-                        (Relation.subject_id.in_(frontier)) | (Relation.object_id.in_(frontier)),
-                    )
-                    .all()
-                )
-                for s, o in rels:
-                    if s in self_ids or o in self_ids:
-                        continue
-                    G.add_edge(f"e{s}", f"e{o}", weight=1.0)
-                    nxt.update((s, o))
-                ment = (
-                    session.query(Mention.entity_id, Mention.memory_id)
-                    .join(Memory, Memory.id == Mention.memory_id)
-                    .filter(Mention.entity_id.in_(frontier), Memory.invalidated_at.is_(None))
-                    .all()
-                )
-                mem_ids = {m for _, m in ment}
-                for e, m in ment:
-                    G.add_edge(f"e{e}", f"m{m}", weight=1.0)
-                if mem_ids:
-                    for e, m in (
-                        session.query(Mention.entity_id, Mention.memory_id)
-                        .filter(Mention.memory_id.in_(list(mem_ids)))
+            seeds = self.match_query_entities(query, scope, include_shared)
+            session = self.storage.get_session()
+            try:
+                if seed_memory_ids:
+                    for (eid,) in (
+                        session.query(Edge.dst_id)
+                        .filter(
+                            Edge.kind == "about",
+                            Edge.src_kind == "fact",
+                            Edge.src_id.in_([int(m) for m in seed_memory_ids]),
+                            Edge.invalidated_at.is_(None),
+                        )
                         .all()
                     ):
-                        if e in self_ids:
-                            continue
-                        G.add_edge(f"e{e}", f"m{m}", weight=1.0)
-                        nxt.add(e)
-                frontier = nxt - visited
-            personalization = {f"e{e}": w for e, w in seeds.items() if f"e{e}" in G}
-            if not personalization:
-                return []
-            scores = nx.pagerank(G, alpha=alpha, personalization=personalization, weight="weight", max_iter=100)
-            ranked = sorted(
-                ((int(n[1:]), s) for n, s in scores.items() if n.startswith("m")),
-                key=lambda x: x[1],
-                reverse=True,
+                        seeds[eid] = max(seeds.get(eid, 0.0), 0.3)
+                if not seeds:
+                    return []
+                self_ids = [
+                    r[0]
+                    for r in self._scoped(
+                        session.query(Entity.id).filter(Entity.is_self == 1), Entity, scope, include_shared
+                    ).all()
+                ]
+            finally:
+                session.close()
+            exclude = [("entity", i) for i in self_ids]
+            result = self.engine.ppr(
+                self.storage.namespace or scope.namespace,
+                scope.user_id,
+                {("entity", e): w for e, w in seeds.items() if e not in self_ids},
+                include_shared=include_shared,
+                exclude=exclude,
+                weights=weights,
             )
-            return ranked[:k]
+            return result.top("fact", k)
         except Exception as e:
             logger.debug("PPR failed: %s", e)
             return []
-        finally:
-            session.close()
 
     def entity_facts(self, name: str, scope: Scope, limit: int = 20) -> List[Dict[str, Any]]:
         """Valid facts that mention an entity."""
@@ -474,8 +455,14 @@ class KnowledgeGraph:
                 return []
             mem_ids = [
                 r[0]
-                for r in session.query(Mention.memory_id)
-                .filter(Mention.entity_id.in_(ids), Mention.memory_id.isnot(None))
+                for r in session.query(Edge.src_id)
+                .filter(
+                    Edge.kind == "about",
+                    Edge.src_kind == "fact",
+                    Edge.dst_kind == "entity",
+                    Edge.dst_id.in_(ids),
+                    Edge.invalidated_at.is_(None),
+                )
                 .limit(limit * 3)
                 .all()
             ]
@@ -487,21 +474,21 @@ class KnowledgeGraph:
         """All edges in scope as dicts (for inspection/export)."""
         session = self.storage.get_session()
         try:
-            q = self._scoped(session.query(Relation), Relation, scope)
+            q = self._scoped(session.query(Edge).filter(Edge.kind == "relates"), Edge, scope)
             if not include_invalid:
-                q = q.filter(Relation.invalidated_at.is_(None))
+                q = q.filter(Edge.invalidated_at.is_(None))
             rels = q.all()
-            ent_ids = {r.subject_id for r in rels} | {r.object_id for r in rels}
+            ent_ids = {r.src_id for r in rels} | {r.dst_id for r in rels}
             names = {
                 e.id: e.name for e in session.query(Entity).filter(Entity.id.in_(list(ent_ids))).all()
             } if ent_ids else {}
             return [
                 {
                     "id": r.id,
-                    "subject": names.get(r.subject_id),
+                    "subject": names.get(r.src_id),
                     "predicate": r.predicate,
-                    "object": names.get(r.object_id),
-                    "memory_id": r.memory_id,
+                    "object": names.get(r.dst_id),
+                    "memory_id": r.evidence_id if r.evidence_kind == "fact" else None,
                     "valid_from": r.valid_from.isoformat() if r.valid_from else None,
                     "invalidated_at": r.invalidated_at.isoformat() if r.invalidated_at else None,
                 }
@@ -522,13 +509,18 @@ class KnowledgeGraph:
     def stats(self, scope: Optional[Scope] = None) -> Dict[str, int]:
         session = self.storage.get_session()
         try:
-            eq, rq = session.query(Entity), session.query(Relation).filter(Relation.invalidated_at.is_(None))
+            valid = session.query(Edge).filter(Edge.invalidated_at.is_(None))
+            eq = session.query(Entity)
+            rq = valid.filter(Edge.kind == "relates")
+            mq = valid.filter(Edge.kind.in_(("about", "mentions")))
             if scope is not None:
-                eq, rq = self._scoped(eq, Entity, scope), self._scoped(rq, Relation, scope)
+                eq, rq, mq = (self._scoped(eq, Entity, scope), self._scoped(rq, Edge, scope),
+                              self._scoped(mq, Edge, scope))
             return {
                 "entities": eq.count(),
                 "relations": rq.count(),
-                "mentions": session.query(Mention).count(),
+                "mentions": mq.count(),
+                "edges": (self._scoped(valid, Edge, scope) if scope is not None else valid).count(),
             }
         finally:
             session.close()

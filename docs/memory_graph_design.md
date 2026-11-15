@@ -137,6 +137,14 @@ INDEX (src_kind, src_id, kind), (dst_kind, dst_id, kind), (namespace, user_id, k
 | team: 50k facts, ~134k edges | 271 ms / 514 ms; **0.62** | **16 ms** | — | 10–12 ms; 0.60–0.81 | 49 ms |
 | org: 300k facts, ~810k edges | 862 ms / **3.1 s**; **0.26** | 146 ms | **71 ms / 142 ms; 0.88** | 5–10 ms; 0.72–0.81 | 509 ms |
 
+**The implemented engine** (G0, [engine.py](../memorable_ai/graph/engine.py)) on the same benchmark, through the production code path (`--sizes per-user,team,org`):
+
+| Partition size | v0.2 algorithm | `GraphEngine` (exact, tol 1e-4) | Overlap@20 vs exact: engine / v0.2 |
+|---|---|---|---|
+| per-user | 34 ms | **1.7 ms** | 0.93 / 0.89 |
+| team | 186 ms (p95 438) | **12.4 ms** (p95 19) | 0.91 / 0.52 |
+| org | 751 ms (p95 3.0 s) | **86 ms** (p95 199) | 0.92 / 0.52 |
+
 **Reading the numbers:**
 - The current approach is slow, and it is also **wrong at scale**: the hop and node caps truncate the walk, so it agrees with exact PPR only 26% of the time on the org graph.
 - Overlap@20 understates agreement for every engine, because many facts attached to the same entity tie on score. float32 vs float64 exact still lands at only 0.88.
@@ -245,7 +253,7 @@ The circuit breaker and `model="none"` keep working, so tests stay LLM-free with
 
 | Phase | Deliverable | Testable by |
 |---|---|---|
-| **G0 Edge table, engine & provenance** | `edges` + `GraphStore`; the CSR `GraphEngine` (watermark sync, exact float32 PPR, push fallback); migration of relations/mentions; `derived_from` / `part_of` / `next` written by the existing pipeline; `user`/`org` tiers; `agent_id` on scope | existing 113 tests stay green; provenance and cascade tests; `ppr_engines.py` shows the speed-up |
+| **G0 Edge table, engine & provenance** ✅ done 2026-11-15 | `edges` + `GraphStore`; the CSR `GraphEngine` (watermark sync, exact float32 PPR, push fallback); migration of relations/mentions; `derived_from` / `part_of` / `next` written by the existing pipeline; `user`/`org` tiers; `agent_id` on scope | existing 113 tests stay green; provenance and cascade tests; `ppr_engines.py` shows the speed-up |
 | **G1 Ontology & resolution** | Type and predicate registry, registry-guided LLM extraction, entity resolution, entity summaries, `alias_of` | mocked-LLM tests; resolution fixtures (same name, different person; nicknames) |
 | **G2 Multi-layer graph retrieval** | Typed PPR producing per-kind lists, entity cards in L4, `as_of` queries | retrieval unit tests; LoCoMo retrieval eval when evals resume |
 | **G3 Procedural subgraph** | Procedural P2–P4 write and read through `edges` | procedural golden traces |

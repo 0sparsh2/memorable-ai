@@ -5,6 +5,28 @@ All notable changes to Memorable will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - Unreleased
+
+Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instruments_analysis.md`.
+
+### Added
+- One typed, bi-temporal `edges` table links every layer:
+  - `relates`, `about`, `mentions`
+  - `derived_from` (fact → turn/episode provenance)
+  - `part_of` (turn → episode → session)
+  - `next` (episode chain)
+  - `supersedes`
+- `GraphEngine`: in-process scipy CSR partitions with delta sync (change cursor + `graph_epoch`), exact float32 PPR with exact node masking, and a local-push fallback.
+  - Graph ranking is 8–20× faster than v0.2 and stays accurate at scale (`benchmarks/graph/ppr_engines.py`).
+- Tiers: `user` (private) plus the shared `org` tier (`user_id` NULL). Queries walk the user's partition with the org partition. Other users' edges are never loaded.
+- `agent_id` on `Scope`, `engine.scope(agent_id=...)`, provider `metadata.agent_id`, and on memories, turns, episodes, sessions, entities and edges.
+- `Storage.unsupported_dependents()` (cascade primitive), `add_edges`, `invalidate_edges`, `delete_node_edges`, `graph_state`.
+- Query-embedding LRU cache.
+
+### Changed
+- `relations` and `mentions` are replaced by `edges`. Existing databases are backfilled once; the legacy tables are left untouched.
+- Invalidating a fact retires its walkable edges; provenance edges stay as history.
+
 ## [0.2.0] - Unreleased
 
 Foundation rework. See `docs/memory_architecture.md`.

@@ -226,6 +226,8 @@ class WritePipeline:
         for f in facts:
             f["user_id"] = scope.user_id
             f["session_id"] = scope.session_id
+            if scope.agent_id:
+                f.setdefault("agent_id", scope.agent_id)
             f.setdefault("source", "conversation")
             if episode_id is not None:
                 f.setdefault("source_episode_id", episode_id)

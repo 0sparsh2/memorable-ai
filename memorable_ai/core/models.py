@@ -10,11 +10,18 @@ Layers (all in one SQL database):
     L2  memories         semantic facts, versioned bi-temporally (valid_* = when true in
                          the world, created_at/invalidated_at = when we learned/retracted it)
         entities         knowledge-graph nodes
-        relations        knowledge-graph edges (subject, predicate, object), versioned like facts
-        mentions         links entities to the facts / episodes / turns that mention them
         identity_aliases session/device aliases -> canonical user id
+    graph edges          ONE typed, bi-temporal edge table linking rows of every layer:
+                         relates (entity->entity, with predicate), about (fact->entity),
+                         mentions (episode/turn->entity), derived_from (fact->turn/episode),
+                         part_of (turn->episode->session), next (episode->episode),
+                         supersedes (fact->fact). Nodes are the rows of the tables above,
+                         addressed as (kind, id). See docs/memory_graph_design.md.
+        memorable_meta   small key/value table (graph epoch for cache invalidation)
 
 Every row carries ``namespace`` and ``user_id`` so all queries can be scoped in SQL.
+``user_id`` NULL is the shared ``org`` tier of the namespace. ``agent_id`` records which
+agent produced a row; it is an attribute for ranking/filtering, not an isolation wall.
 """
 
 from datetime import datetime, timezone
@@ -24,7 +31,6 @@ from sqlalchemy import (
     Column,
     DateTime,
     Float,
-    ForeignKey,
     Index,
     Integer,
     String,
@@ -51,6 +57,7 @@ class Memory(Base):
     memory_type = Column(String(50), nullable=False, index=True)
     namespace = Column(String(255), index=True)
     user_id = Column(String(255), nullable=True, index=True)
+    agent_id = Column(String(255), nullable=True)
     session_id = Column(String(255), nullable=True, index=True)
     extra_metadata = Column(JSON)
     embedding = Column(JSON)
@@ -106,6 +113,7 @@ class SessionRecord(Base):
     namespace = Column(String(255), index=True)
     session_id = Column(String(255), nullable=False, index=True)
     user_id = Column(String(255), nullable=True, index=True)
+    agent_id = Column(String(255), nullable=True)
     summary = Column(Text, nullable=True)
     turn_count = Column(Integer, default=0)
     started_at = Column(DateTime, default=utcnow)
@@ -124,6 +132,7 @@ class Turn(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     namespace = Column(String(255), index=True)
     user_id = Column(String(255), nullable=True, index=True)
+    agent_id = Column(String(255), nullable=True)
     session_id = Column(String(255), nullable=False, index=True)
     seq = Column(Integer, nullable=False)
     role = Column(String(32), nullable=False)
@@ -146,6 +155,7 @@ class Episode(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     namespace = Column(String(255), index=True)
     user_id = Column(String(255), nullable=True, index=True)
+    agent_id = Column(String(255), nullable=True)
     session_id = Column(String(255), nullable=False, index=True)
     status = Column(String(16), default="open", index=True)  # open | closed
     title = Column(String(255), nullable=True)
@@ -181,6 +191,7 @@ class Entity(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     namespace = Column(String(255), index=True)
     user_id = Column(String(255), nullable=True, index=True)
+    agent_id = Column(String(255), nullable=True)
     name = Column(String(255), nullable=False)
     norm_name = Column(String(255), nullable=False, index=True)
     entity_type = Column(String(50), default="concept")
@@ -193,38 +204,62 @@ class Entity(Base):
     __table_args__ = (Index("idx_entity_scope_name", "namespace", "user_id", "norm_name"),)
 
 
-class Relation(Base):
-    """Knowledge-graph edge with bi-temporal validity and provenance."""
+# Node kinds addressed by edges. Each maps to a table above (or a later layer).
+NODE_KINDS = ("turn", "session", "episode", "task", "entity", "fact", "procedure", "step", "insight", "community")
 
-    __tablename__ = "relations"
+
+class Edge(Base):
+    """
+    One typed edge of the memory graph.
+
+    ``valid_from``/``valid_to`` are event time (when it was true); ``created_at``/
+    ``invalidated_at`` are transaction time (when we learned / retired it).
+    ``evidence_*`` points at the row that asserted the edge (e.g. the fact behind a
+    ``relates`` edge), so deleting evidence can cascade.
+    """
+
+    __tablename__ = "edges"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     namespace = Column(String(255), index=True)
     user_id = Column(String(255), nullable=True, index=True)
-    subject_id = Column(Integer, ForeignKey("entities.id"), nullable=False, index=True)
-    predicate = Column(String(100), nullable=False, index=True)
-    object_id = Column(Integer, ForeignKey("entities.id"), nullable=False, index=True)
-    memory_id = Column(Integer, nullable=True, index=True)
-    episode_id = Column(Integer, nullable=True)
+    agent_id = Column(String(255), nullable=True)
+    src_kind = Column(String(16), nullable=False)
+    src_id = Column(Integer, nullable=False)
+    kind = Column(String(24), nullable=False)
+    dst_kind = Column(String(16), nullable=False)
+    dst_id = Column(Integer, nullable=False)
+    predicate = Column(String(100), nullable=True)
+    role = Column(String(32), nullable=True)
+    weight = Column(Float, default=1.0)
     confidence = Column(Float, default=1.0)
-    valid_from = Column(DateTime, default=utcnow)
+    valid_from = Column(DateTime, nullable=True)
     valid_to = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=utcnow)
     invalidated_at = Column(DateTime, nullable=True, index=True)
     superseded_by_id = Column(Integer, nullable=True)
-    created_at = Column(DateTime, default=utcnow)
+    evidence_kind = Column(String(16), nullable=True)
+    evidence_id = Column(Integer, nullable=True)
+    source = Column(String(16), nullable=True)
+    trust_tier = Column(String(16), nullable=True)
+    extra = Column(JSON, nullable=True)
+
+    __table_args__ = (
+        Index("ix_edges_src", "src_kind", "src_id", "kind"),
+        Index("ix_edges_dst", "dst_kind", "dst_id", "kind"),
+        Index("ix_edges_scope", "namespace", "user_id", "kind", "invalidated_at"),
+        Index("ix_edges_evidence", "evidence_kind", "evidence_id"),
+        Index("ix_edges_predicate", "kind", "predicate"),
+    )
 
 
-class Mention(Base):
-    """Entity <-> evidence link. Exactly one of memory_id / episode_id / turn_id is set."""
+class MemorableMeta(Base):
+    """Tiny key/value table for cross-process signals (e.g. ``graph_epoch``)."""
 
-    __tablename__ = "mentions"
+    __tablename__ = "memorable_meta"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    entity_id = Column(Integer, ForeignKey("entities.id"), nullable=False, index=True)
-    memory_id = Column(Integer, nullable=True, index=True)
-    episode_id = Column(Integer, nullable=True, index=True)
-    turn_id = Column(Integer, nullable=True, index=True)
-    created_at = Column(DateTime, default=utcnow)
+    key = Column(String(64), primary_key=True)
+    value = Column(String(255), nullable=True)
 
 
 class IdentityAlias(Base):

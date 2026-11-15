@@ -17,6 +17,7 @@ import os
 import re
 import threading
 import zlib
+from collections import OrderedDict
 from typing import Dict, Iterable, List, Optional, Sequence, Union
 
 import numpy as np
@@ -79,6 +80,11 @@ class Embedder:
         self._lock = threading.Lock()
         self._model = None
         self._hash: Optional[HashingEmbedder] = None
+        # Agent tool loops resend the same user message on every LLM call, so query
+        # embeddings repeat constantly; a small LRU skips the model (~6 ms/query on CPU).
+        self._query_cache: "OrderedDict[str, np.ndarray]" = OrderedDict()
+        self.query_cache_size = int(os.getenv("MEMORABLE_QUERY_EMBED_CACHE", "2048"))
+        self.query_cache_hits = 0
         if self.model_name.lower() in HASH_MODEL_NAMES:
             self._hash = HashingEmbedder()
         else:
@@ -128,14 +134,27 @@ class Embedder:
         Encode a search query. Asymmetric retrieval models (EmbeddingGemma, BGE, E5,
         Nomic) define a "query" prompt; documents are encoded without it.
         """
+        cached = self._query_cache.get(text) if self.query_cache_size else None
+        if cached is not None:
+            with self._lock:
+                self._query_cache.move_to_end(text)
+                self.query_cache_hits += 1
+            return cached.copy()
         prompts = getattr(self._model, "prompts", None) or {}
         if self._model is not None and "query" in prompts:
             with self._lock:
                 vec = np.asarray(
                     self._model.encode([text], prompt_name="query", show_progress_bar=False), dtype=np.float32
                 )
-            return _normalize_rows(vec)[0]
-        return self.encode(text)
+            out = _normalize_rows(vec)[0]
+        else:
+            out = self.encode(text)
+        if self.query_cache_size:
+            with self._lock:
+                self._query_cache[text] = out.copy()
+                if len(self._query_cache) > self.query_cache_size:
+                    self._query_cache.popitem(last=False)
+        return out
 
     def encode_list(self, text: str) -> List[float]:
         """Encode a single string to a plain list (for JSON storage)."""
