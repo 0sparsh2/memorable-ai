@@ -40,6 +40,9 @@ Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instru
   - Benchmarks: `benchmarks/embeddings/turn_signals.py` (fusion rules, rerankers, bootstrap CIs on LoCoMo and LongMemEval) and `bench_rerank_latency.py`. `retrieval_eval.py` gains `turn/pipeline`, `--fusion` and `--rerank`.
   - `training/kaggle/`: synthetic memory-QA generation and contrastive / reranker fine-tuning jobs (Kaggle GPUs).
 
+### Changed
+- Python 3.10+ is required. 3.8 and 3.9 are past end of life, and current numpy, sentence-transformers and onnxruntime need 3.10+. CI now tests 3.10–3.14 with current GitHub Actions.
+
 ### Fixed (found by the G0 deep evaluation, `docs/g0_deep_evaluation.md`)
 - The graph engine synced invalidations by timestamp and could permanently miss one committed out of order. Sync now follows a commit-ordered write sequence.
 - Nodes whose edges were all invalidated kept teleport mass as seeds.
@@ -49,6 +52,7 @@ Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instru
 - Property tests leaked temporary databases.
 - Graph engine memory went from 342 to 101 bytes per edge.
 - `scipy` (imported by the graph engine) is now a declared dependency. Before, it was only installed transitively.
+- `requirements.txt` no longer installs the obsolete PyPI `asyncio` backport (asyncio is in the standard library).
 
 ### Changed
 - `relations` and `mentions` are replaced by `edges`. Existing databases are backfilled once; the legacy tables are left untouched.
