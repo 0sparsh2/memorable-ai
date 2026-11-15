@@ -505,9 +505,18 @@ async def answer_one(rec: Dict[str, Any], ledger: Ledger, stub: bool, sem) -> Di
                                      stub=_stub_answer(rec["context"]) if stub else None)
     ledger.add({"arm": rec["arm"], "qid": rec["qid"], "call": "answer", "usage": usage, "cost": _cost(usage),
                 "ms": round(1000 * (time.perf_counter() - t)), "parsed": bool(text)})
+    fallback = False
+    if not text and not stub:  # prereg v3: thinking ran to the cap with no reply -> ask once without thinking
+        fallback = True
+        async with sem:
+            t = time.perf_counter()
+            text, usage2 = await llm_call(prompt, system=None, effort="minimal", max_tokens=512, stub=None)
+        ledger.add({"arm": rec["arm"], "qid": rec["qid"], "call": "answer_fallback", "usage": usage2,
+                    "cost": _cost(usage2), "ms": round(1000 * (time.perf_counter() - t)), "parsed": bool(text)})
     verdicts = await judge(rec, text, ledger, stub, sem)
     return {"arm": rec["arm"], "bench": rec["bench"], "qid": rec["qid"], "split": rec.get("split"),
             "category": rec["category"], "abstention": rec["abstention"], "response": text,
+            "answer_fallback": fallback,
             "in_tokens": usage["in"], "retrieval_ms": rec.get("retrieval_ms"), **verdicts}
 
 
@@ -633,14 +642,24 @@ async def cmd_decoys(args) -> None:
                 acc[key][0] += v[name] is expect
                 acc[key][1] += 1
     report = {f"{b}/{j}/{k}": round(h / n, 3) for (b, j, k), (h, n) in sorted(acc.items())}
+    # Bar B6 as preregistered: per benchmark and judge, >= 95% of all decoys (shuffled, don't know,
+    # perturbed together) judged WRONG, and >= 95% of gold answers judged CORRECT.
+    b6 = {}
+    for b, j in {(b, j) for (b, j, _) in acc}:
+        dh = sum(acc[(b, j, k)][0] for k in ("shuffled", "dont_know", "perturbed") if (b, j, k) in acc)
+        dn = sum(acc[(b, j, k)][1] for k in ("shuffled", "dont_know", "perturbed") if (b, j, k) in acc)
+        b6[f"{b}/{j}"] = {"decoys_wrong": round(dh / dn, 3), "gold_correct": acc[(b, j, "gold")][0] / acc[(b, j, "gold")][1]}
     with open(run / f"decoys_{tag}_items.jsonl", "w") as f:
         for (r, resp, expect, kind), v in zip(rows, verdicts):
             f.write(json.dumps({"bench": r["bench"], "kind": kind, "question": r["question"], "gold": r["answer"],
                                 "response": resp, "expect_correct": expect,
                                 **{k: v[k] for k in ("j", "j_strict", "j_lenient") if k in v}}) + "\n")
-    strict_ok = all(v >= 0.95 for k, v in report.items() if "/j_lenient/" not in k)
-    json.dump({"decoys": report, "spent_usd": round(ledger.spent, 4)}, open(run / f"decoys_{tag}.json", "w"), indent=2)
+    strict_ok = all(v["decoys_wrong"] >= 0.95 and v["gold_correct"] >= 0.95
+                    for k, v in b6.items() if not k.endswith("j_lenient"))
+    json.dump({"decoys": report, "b6": b6, "spent_usd": round(ledger.spent, 4)}, open(run / f"decoys_{tag}.json", "w"),
+              indent=2)
     print(json.dumps(report, indent=1))
+    print("B6:", json.dumps(b6))
     print(f"CHECK: scorer-on-decoys {'ok' if strict_ok else 'FAIL'} ({tag} judge)")
 
 

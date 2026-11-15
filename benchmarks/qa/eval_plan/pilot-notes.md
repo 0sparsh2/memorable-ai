@@ -21,5 +21,12 @@ Model: `nvidia/nemotron-3.5-lightning-30b-a3b` on NIM (free). Inputs: dev rows o
 - Fix (prereg-v2): an 8,192-token answer cap.
 - Latency: about 6 s per call at the median, including rate-limiter spacing at 60 requests/min.
 
-## Attempt 2 (prereg v2)
+## Attempt 2 (prereg v2), 2026-11-15
+Fresh run directory, same dev contexts.
+
+**Decoys.** All gold answers were judged CORRECT. Every decoy type scored 1.0 on both strict judges, with one exception: LME shuffled scored 0.9. The miss was the judge accepting another question's rubric-style gold text ("7 days ago. 8 days … is also acceptable") for a "4 days" question; the temporal template tolerates off-by-one, but 7/8 vs 4 is not off-by-one. **B6 as written passes**: LME 29/30 decoys judged WRONG (96.7%), LoCoMo J-strict 30/30, and gold 10/10 on both. The code had applied the bar to each decoy type separately (stricter than written), and was corrected in v3.
+
+**Answers (30).** 1 empty: A0 (full context) on a 108k-token LME history, where thinking looped to the 8,192-token cap. Median output 1,132 tokens. Latency p50: answers 5.2 s, judges 2.4–4.2 s at 120 requests/min. Under the rule the pilot stops again; v3 adds a no-thinking fallback for empty answers in every arm.
+
+## Attempt 3 (prereg v3)
 Results below.
