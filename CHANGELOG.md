@@ -33,6 +33,12 @@ Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instru
   - Per-layer vector-space tags with automatic re-embedding when the model changes.
 - `memorable-ai[fast]` extra (onnxruntime, model2vec, numba). Hypothesis property tests (dev extra), a concurrency test, and LongMemEval / model / backend benchmarks.
 - Optional numba kernel for local-push PPR.
+- Retrieval round 2 (`docs/retrieval_round2.md`):
+  - **Score fusion** for the turn and episode layers (`RetrievalConfig.fusion = "score"`, the new default). Each signal's scores are z-normalised over the candidate pool. LoCoMo end to end: turn recall@5 0.642 → 0.701, episode recall@5 0.541 → 0.575. `fusion="rrf"` restores rank fusion. Non-semantic (hash) embedders keep RRF.
+  - **Cross-encoder reranking of turn excerpts** (opt-in: `rerank=True`), with `rerank_depth` (20) and `rerank_blend` (0). `memorable_ai/core/rerank.py` runs rerankers on ONNX Runtime with identical scores, including modular cross-encoders such as the Ettin family. Ettin-17M adds +5.5 pts LoCoMo turn@5 at about 32–50 ms per query.
+  - `VectorIndex.scores_for` / `Storage.vector_scores`: exact cosine for given ids.
+  - Benchmarks: `benchmarks/embeddings/turn_signals.py` (fusion rules, rerankers, bootstrap CIs on LoCoMo and LongMemEval) and `bench_rerank_latency.py`. `retrieval_eval.py` gains `turn/pipeline`, `--fusion` and `--rerank`.
+  - `training/kaggle/`: synthetic memory-QA generation and contrastive / reranker fine-tuning jobs (Kaggle GPUs).
 
 ### Fixed (found by the G0 deep evaluation, `docs/g0_deep_evaluation.md`)
 - The graph engine synced invalidations by timestamp and could permanently miss one committed out of order. Sync now follows a commit-ordered write sequence.
