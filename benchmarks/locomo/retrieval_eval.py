@@ -5,7 +5,8 @@ Ingests each LoCoMo conversation through the real Memorable write pipeline
 (turns -> episodes -> facts -> graph), then for every question checks whether
 the annotated evidence turns (``dia_id``s) come back in the top-k:
 
-* turn recall@k for each signal (dense, lexical, fused RRF)
+* turn recall@k for each signal (dense, lexical, fused RRF) and for the retriever's own
+  turn ranking (``turn/pipeline``: score or rank fusion, per ``--fusion``)
 * episode recall@k (an episode "hits" when it contains an evidence turn)
 
 This measures the retrieval layer only. It is *not* LoCoMo QA accuracy (that
@@ -25,7 +26,7 @@ import tempfile
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict
 
 os.environ.setdefault("MEMORABLE_LLM__DEFAULT_MODEL", "none")
 
@@ -45,7 +46,8 @@ CATEGORY_NAMES = {1: "multi-hop", 2: "temporal", 3: "open-domain", 4: "single-ho
 WEIGHTS = [(1.0, 0.8), (1.0, 1.0), (0.7, 1.0), (0.5, 1.0), (0.3, 1.0)]
 
 
-async def evaluate(convs: int, k: int, embedder: str, db_dir: Path, turn_context: float = 0.5) -> Dict:
+async def evaluate(convs: int, k: int, embedder: str, db_dir: Path, turn_context: float = 0.5,
+                   fusion: str = "", rerank: str = "", rerank_blend: float = 0.0) -> Dict:
     os.environ["MEMORABLE_LLM__EMBEDDING_MODEL"] = embedder
     from memorable_ai import MemoryEngine
     from memorable_ai.core.models import Episode, Turn
@@ -100,6 +102,10 @@ async def evaluate(convs: int, k: int, embedder: str, db_dir: Path, turn_context
 
         scope = Scope(user_id=conv_id)
         r = eng._retrieval
+        if fusion:
+            r.fusion = fusion
+        if rerank:
+            r.rerank, r.rerank_model, r.rerank_blend, r._reranker = True, rerank, rerank_blend, None
         for qa in iter_qa(sample, categories={1, 2, 3, 4}):
             if qa.category == CATEGORY_ADVERSARIAL or not qa.evidence:
                 continue
@@ -122,10 +128,22 @@ async def evaluate(convs: int, k: int, embedder: str, db_dir: Path, turn_context
                 ]
                 for wd, wl in WEIGHTS
             }
+            scored = r._rank_layer_scored("turn", qa.question, tvec, scope, k, pool=50)  # what recall() ranks
+            pipeline = [i for i, _ in scored]
+            reranked = None
+            if rerank:
+                items = eng._storage.hydrate_turns(pipeline, user_id=conv_id)
+                first = dict(scored)
+                items = r._rerank(qa.question, items, [first[t["id"]] for t in items], depth=r.rerank_depth)
+                reranked = [t["id"] for t in items]
             eps = r._rank_layer("episode", qa.question, qvec, scope, k)
             timings["query_ms"].append((time.time() - q0) * 1000)
             cat = CATEGORY_NAMES.get(qa.category, str(qa.category))
-            for name, ids in (("turn/dense", dense), ("turn/lexical", lexical), ("turn/fused", fused), *sweep.items()):
+            signals = [("turn/dense", dense), ("turn/lexical", lexical), ("turn/fused", fused),
+                       ("turn/pipeline", pipeline), *sweep.items()]
+            if reranked is not None:
+                signals.append(("turn/reranked", reranked))
+            for name, ids in signals:
                 hit = bool(gold & {dia_by_turn.get(i) for i in ids[:k]})
                 totals[name][cat][0] += hit
                 totals[name][cat][1] += 1
@@ -134,7 +152,8 @@ async def evaluate(convs: int, k: int, embedder: str, db_dir: Path, turn_context
             totals["episode/fused"][cat][1] += 1
         eng.close()
 
-    report = {"k": k, "embedder": embedder, "turn_context": turn_context, "conversations": convs, **stats}
+    report = {"k": k, "embedder": embedder, "turn_context": turn_context, "conversations": convs,
+              "fusion": fusion or "default", "rerank": rerank or None, "rerank_blend": rerank_blend, **stats}
     report["ingest_seconds"] = round(timings["ingest_s"], 1)
     q = sorted(timings["query_ms"])
     report["query_ms_p50"] = round(q[len(q) // 2], 1) if q else None
@@ -155,10 +174,14 @@ def main() -> None:
     ap.add_argument("--k", type=int, default=5)
     ap.add_argument("--embedder", default="sentence-transformers/all-MiniLM-L6-v2")
     ap.add_argument("--turn-context", type=float, default=0.5, help="contextual turn embedding weight")
+    ap.add_argument("--fusion", default="", help="override turn/episode fusion: score | rrf")
+    ap.add_argument("--rerank", default="", help="reranker spec for turn/reranked (empty = off)")
+    ap.add_argument("--rerank-blend", type=float, default=0.0)
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
     with tempfile.TemporaryDirectory() as d:
-        report = asyncio.run(evaluate(args.convs, args.k, args.embedder, Path(d), args.turn_context))
+        report = asyncio.run(evaluate(args.convs, args.k, args.embedder, Path(d), args.turn_context, args.fusion,
+                                      args.rerank, args.rerank_blend))
     text = json.dumps(report, indent=2)
     print(text)
     if args.out:
