@@ -42,6 +42,7 @@ Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instru
 - CI ignored test failures (`|| true`).
 - Property tests leaked temporary databases.
 - Graph engine memory went from 342 to 101 bytes per edge.
+- `scipy` (imported by the graph engine) is now a declared dependency. Before, it was only installed transitively.
 
 ### Changed
 - `relations` and `mentions` are replaced by `edges`. Existing databases are backfilled once; the legacy tables are left untouched.
