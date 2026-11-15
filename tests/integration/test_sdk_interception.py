@@ -1,6 +1,11 @@
 """
 Zero-code interception against the real OpenAI / Anthropic SDKs.
 
+Memory goes in front of the latest user message by default (``injection="tail"``),
+so the rest of the request stays byte-identical across turns and the provider's
+prompt cache keeps the conversation prefix; ``injection="system"`` keeps the
+v0.2 placement (system prompt / ``system`` / ``instructions``).
+
 No network: each client gets a mock transport that records the request body and
 returns a canned response. The transport comes from whichever HTTP library the
 installed SDK is built on (``httpx``, or ``httpx2`` in anthropic>=2). These tests check what actually goes over
@@ -168,10 +173,12 @@ def test_openai_chat_injects_scoped_memory_and_records(engine):
         )
     assert resp.choices[0].message.content == "Avoid peanut snacks."
     sent = rec.last["messages"]
-    assert len(sent) == 2, "context is merged into the existing system prompt, not prepended"
-    assert sent[0]["content"].startswith("You are a chef.")
-    assert "allergic to peanuts" in sent[0]["content"]
-    assert "shellfish" not in sent[0]["content"], "another user's memory leaked"
+    assert len(sent) == 2, "no extra messages"
+    assert sent[0] == {"role": "system", "content": "You are a chef."}, "system prompt untouched (cache prefix)"
+    assert sent[1]["content"].startswith("<memory>")
+    assert sent[1]["content"].endswith("Which snacks should I avoid? Any allergies?")
+    assert "allergic to peanuts" in sent[1]["content"]
+    assert "shellfish" not in sent[1]["content"], "another user's memory leaked"
     assert _turns(engine, "chat-1") == [
         ("user", "Which snacks should I avoid? Any allergies?"),
         ("assistant", "Avoid peanut snacks."),
@@ -186,10 +193,10 @@ def test_openai_user_isolation_via_metadata(engine):
         messages=[{"role": "user", "content": "Do I have any food allergies?"}],
         metadata={"user_id": "bob", "session_id": "bob-1"},
     )
-    system = rec.last["messages"][0]
-    assert system["role"] == "system"
-    assert "shellfish" in system["content"]
-    assert "peanuts" not in system["content"]
+    sent = rec.last["messages"]
+    assert [m["role"] for m in sent] == ["user"]
+    assert "shellfish" in sent[0]["content"]
+    assert "peanuts" not in sent[0]["content"]
 
 
 def test_anonymous_call_sees_no_user_memory(engine):
@@ -197,10 +204,10 @@ def test_anonymous_call_sees_no_user_memory(engine):
     _openai(rec).chat.completions.create(
         model="gpt-4o-mini", messages=[{"role": "user", "content": "Do I have any food allergies?"}]
     )
-    assert all(m["role"] != "system" for m in rec.last["messages"])
+    assert rec.last["messages"] == [{"role": "user", "content": "Do I have any food allergies?"}]
 
 
-def test_anthropic_context_goes_in_system_param(engine):
+def test_anthropic_context_goes_in_latest_user_turn(engine):
     rec = Recorder(ANTHROPIC_MSG)
     client = _anthropic(rec)
     resp = client.messages.create(
@@ -213,8 +220,8 @@ def test_anthropic_context_goes_in_system_param(engine):
     assert resp.content[0].text == "Skip the satay."
     body = rec.last
     assert all(m["role"] != "system" for m in body["messages"]), "Anthropic rejects system-role messages"
-    assert body["system"].startswith("Be brief.")
-    assert "allergic to peanuts" in body["system"]
+    assert body["system"] == "Be brief.", "system untouched (cache prefix)"
+    assert "allergic to peanuts" in body["messages"][-1]["content"]
 
 
 def test_openai_stream_is_recorded_after_consumption(engine):
@@ -257,13 +264,16 @@ def test_anthropic_stream_is_recorded(engine):
     assert _turns(engine, "astream-1")[-1] == ("assistant", "No peanuts, ever.")
 
 
-def test_openai_responses_api_uses_instructions(engine):
+def test_openai_responses_api_puts_memory_in_input(engine):
     rec = Recorder(RESPONSES)
     client = _openai(rec)
     with engine.scope(user_id="alice", session_id="resp-1"):
-        resp = client.responses.create(model="gpt-4o-mini", input="Any allergies I should mention to the waiter?")
+        resp = client.responses.create(model="gpt-4o-mini", input="Any allergies I should mention to the waiter?",
+                                       instructions="Be polite.")
     assert resp.output_text == "Noted."
-    assert "allergic to peanuts" in rec.last["instructions"]
+    assert rec.last["instructions"] == "Be polite."
+    assert "allergic to peanuts" in rec.last["input"]
+    assert rec.last["input"].endswith("Any allergies I should mention to the waiter?")
     assert _turns(engine, "resp-1")[-1] == ("assistant", "Noted.")
 
 
@@ -289,8 +299,8 @@ async def test_async_openai_and_anthropic(engine_factory):
             await _anthropic(rec_a, is_async=True).messages.create(
                 model="claude-test", max_tokens=10, messages=[{"role": "user", "content": "And my allergies again?"}]
             )
-        assert "allergic to peanuts" in rec_o.last["messages"][0]["content"]
-        assert "allergic to peanuts" in rec_a.last["system"]
+        assert "allergic to peanuts" in rec_o.last["messages"][-1]["content"]
+        assert "allergic to peanuts" in rec_a.last["messages"][-1]["content"]
         roles = [r for r, _ in _turns(eng, "async-1")]
         assert roles.count("assistant") == 2
     finally:
@@ -326,3 +336,80 @@ def test_background_write_mode_flushes(engine_factory):
         assert "User lives in Lisbon" in contents
     finally:
         eng.disable()
+
+
+def test_system_injection_mode_keeps_v02_placement(engine):
+    engine.config.memory.injection = "system"
+    rec_o, rec_a, rec_r = Recorder(OPENAI_CHAT), Recorder(ANTHROPIC_MSG), Recorder(RESPONSES)
+    with engine.scope(user_id="alice", session_id="sys-1"):
+        _openai(rec_o).chat.completions.create(
+            model="m", messages=[{"role": "system", "content": "You are a chef."},
+                                 {"role": "user", "content": "Which snacks should I avoid?"}])
+        _anthropic(rec_a).messages.create(model="claude-test", max_tokens=10, system="Be brief.",
+                                          messages=[{"role": "user", "content": "My allergies?"}])
+        _openai(rec_r).responses.create(model="m", input="Allergies to mention?")
+    assert rec_o.last["messages"][0]["content"].startswith("You are a chef.")
+    assert "allergic to peanuts" in rec_o.last["messages"][0]["content"]
+    assert rec_o.last["messages"][1]["content"] == "Which snacks should I avoid?"
+    assert rec_a.last["system"].startswith("Be brief.") and "allergic to peanuts" in rec_a.last["system"]
+    assert "allergic to peanuts" in rec_r.last["instructions"]
+
+
+def test_tail_injection_keeps_conversation_prefix_byte_identical(engine):
+    """
+    The cache argument. Memory changes between turns (new facts are learned). With tail
+    placement, call k+1 still starts with call k's request (minus k's memory-carrying user
+    turn), so a provider prompt cache keeps the whole conversation. With system placement
+    the change lands at the very start and the whole history is re-billed.
+    """
+
+    def two_turns(session, new_fact, follow_up):
+        rec = Recorder(OPENAI_CHAT)
+        client = _openai(rec)
+        history = [{"role": "system", "content": "You are a chef."},
+                   {"role": "user", "content": "Which snacks should I avoid?"}]
+        with engine.scope(user_id="alice", session_id=session):
+            client.chat.completions.create(model="m", messages=list(history))
+            first = rec.last["messages"]
+            asyncio.run(engine.add_memory(new_fact, "fact", user_id="alice"))
+            history += [{"role": "assistant", "content": "Avoid peanut snacks."},
+                        {"role": "user", "content": follow_up}]
+            client.chat.completions.create(model="m", messages=list(history))
+            second = rec.last["messages"]
+        return first, second
+
+    first, second = two_turns("cache-tail", "User started a keto diet", "Dinner ideas for my keto diet?")
+    assert second[: len(first) - 1] == first[:-1], "tail mode: conversation prefix unchanged"
+    assert "keto" in second[-1]["content"]
+
+    engine.config.memory.injection = "system"
+    first, second = two_turns("cache-system", "User is training for a marathon",
+                              "Meals for my marathon training?")
+    assert "marathon" in second[0]["content"] and "marathon" not in first[0]["content"]
+    assert second[0] != first[0], "system mode: the very first message changed, so nothing after it is cached"
+
+
+def test_tool_loop_reuses_the_same_memory_block(engine, monkeypatch):
+    calls = []
+    real = engine._context_for
+
+    async def counting(messages, scope):
+        calls.append(1)
+        return await real(messages, scope)
+
+    monkeypatch.setattr(engine, "_context_for", counting)
+    rec = Recorder(OPENAI_CHAT)
+    client = _openai(rec)
+    base = [{"role": "user", "content": "Order dinner that is safe for my allergies."}]
+    loop = base + [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "t1", "type": "function", "function": {"name": "menu", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "t1", "content": "satay, pad thai, green curry"},
+    ]
+    with engine.scope(user_id="alice", session_id="loop-1"):
+        client.chat.completions.create(model="m", messages=base)
+        first = rec.last["messages"][0]["content"]
+        client.chat.completions.create(model="m", messages=loop)
+        second = rec.last["messages"][0]["content"]
+    assert first == second and "allergic to peanuts" in first
+    assert len(calls) == 1, "memory was retrieved again inside the tool loop"

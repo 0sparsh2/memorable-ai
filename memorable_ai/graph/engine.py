@@ -41,7 +41,7 @@ from __future__ import annotations
 import logging
 import threading
 from array import array
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 

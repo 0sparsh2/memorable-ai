@@ -60,9 +60,11 @@ async def test_context_injection(memory_engine):
     messages = [{"role": "user", "content": "What do I like?"}]
     enhanced = await memory_engine._inject_context(messages)
     
-    # Should have system message with context
-    assert len(enhanced) > len(messages)
-    assert enhanced[0]["role"] == "system"
+    # Default placement: in front of the latest user message (prompt-cache friendly)
+    assert len(enhanced) == len(messages)
+    assert enhanced[-1]["content"].startswith("<memory>")
+    assert "Python" in enhanced[-1]["content"]
+    assert enhanced[-1]["content"].endswith("What do I like?")
 
 
 @pytest.mark.asyncio

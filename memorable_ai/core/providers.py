@@ -14,7 +14,7 @@ Each adapter knows:
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from memorable_ai.core.extraction import response_text as _response_text
 
@@ -55,7 +55,8 @@ class Adapter:
             hints["agent_id"] = str(md["agent_id"])
         return hints
 
-    def inject(self, kwargs: Dict[str, Any], context: str) -> Dict[str, Any]:
+    def inject(self, kwargs: Dict[str, Any], context: str, position: str = "system") -> Dict[str, Any]:
+        """Add ``context`` to the request: "tail" (latest user message) or "system" (system prompt)."""
         raise NotImplementedError
 
     def is_stream(self, kwargs: Dict[str, Any]) -> bool:
@@ -68,14 +69,70 @@ class Adapter:
         return ""
 
 
+def memory_block(context: str) -> str:
+    """Retrieved memory, delimited so it reads as reference data next to the user's own words."""
+    text = context.strip()
+    return text if text.startswith("<memory>") else f"<memory>\n{text}\n</memory>"
+
+
+def _prepend(content: Any, block: str, part_type: str = "text") -> Any:
+    if isinstance(content, str):
+        return f"{block}\n\n{content}" if content else block
+    if isinstance(content, (list, tuple)):
+        return [{"type": part_type, "text": block}] + list(content)
+    return block
+
+
+def _last_user_index(items: Sequence[Any]) -> Optional[int]:
+    for i in range(len(items) - 1, -1, -1):
+        if isinstance(items[i], dict) and items[i].get("role") == "user":
+            return i
+    return None
+
+
+def last_user_text(messages: Sequence[Any]) -> str:
+    """Text of the latest user message (the retrieval query); "" if there is none."""
+    i = _last_user_index(list(messages or []))
+    if i is None:
+        return ""
+    content = messages[i].get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, (list, tuple)):
+        return "\n".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
+    return ""
+
+
+def _inject_tail(items: Sequence[Any], context: str, part_type: str = "text") -> Optional[List[Any]]:
+    """
+    Put memory at the tail: in front of the latest user message's text. Everything before
+    that message stays byte-identical across calls, so the provider's prompt cache keeps
+    the whole conversation prefix (it is re-billed in full when memory sits in the system
+    prompt and changes every turn). None when there is no user message.
+    """
+    items = list(items or [])
+    i = _last_user_index(items)
+    if i is None:
+        return None
+    msg = dict(items[i])
+    msg["content"] = _prepend(msg.get("content"), memory_block(context), part_type)
+    items[i] = msg
+    return items
+
+
 class OpenAIChatAdapter(Adapter):
     """openai ``chat.completions.create`` (and OpenAI-compatible shapes)."""
 
     name = "openai.chat"
 
-    def inject(self, kwargs: Dict[str, Any], context: str) -> Dict[str, Any]:
-        messages = list(kwargs.get("messages") or [])
+    def inject(self, kwargs: Dict[str, Any], context: str, position: str = "system") -> Dict[str, Any]:
         new = dict(kwargs)
+        if position == "tail":
+            tail = _inject_tail(kwargs.get("messages") or [], context)
+            if tail is not None:
+                new["messages"] = tail
+                return new
+        messages = list(kwargs.get("messages") or [])
         if messages and isinstance(messages[0], dict) and messages[0].get("role") in ("system", "developer"):
             first = dict(messages[0])
             content = first.get("content")
@@ -113,7 +170,7 @@ class LiteLLMAdapter(OpenAIChatAdapter):
 
 
 class AnthropicAdapter(Adapter):
-    """anthropic ``messages.create``: context goes into ``system``, never into messages."""
+    """anthropic ``messages.create``: context goes into the latest user turn or ``system`` (never a system-role message)."""
 
     name = "anthropic.messages"
 
@@ -126,8 +183,13 @@ class AnthropicAdapter(Adapter):
             hints["agent_id"] = str(md["agent_id"])
         return hints
 
-    def inject(self, kwargs: Dict[str, Any], context: str) -> Dict[str, Any]:
+    def inject(self, kwargs: Dict[str, Any], context: str, position: str = "system") -> Dict[str, Any]:
         new = dict(kwargs)
+        if position == "tail":
+            tail = _inject_tail(kwargs.get("messages") or [], context)
+            if tail is not None:
+                new["messages"] = tail
+                return new
         system = kwargs.get("system")
         if isinstance(system, str) and system:
             new["system"] = f"{system}\n\n{context}"
@@ -169,8 +231,17 @@ class OpenAIResponsesAdapter(Adapter):
             hints["session_id"] = str(_get(conv, "id") or conv) if not isinstance(conv, str) else conv
         return hints
 
-    def inject(self, kwargs: Dict[str, Any], context: str) -> Dict[str, Any]:
+    def inject(self, kwargs: Dict[str, Any], context: str, position: str = "system") -> Dict[str, Any]:
         new = dict(kwargs)
+        if position == "tail":
+            inp = kwargs.get("input")
+            if isinstance(inp, str):
+                new["input"] = _prepend(inp, memory_block(context))
+                return new
+            tail = _inject_tail(inp or [], context, part_type="input_text")
+            if tail is not None:
+                new["input"] = tail
+                return new
         instructions = kwargs.get("instructions")
         if isinstance(instructions, str) and instructions:
             new["instructions"] = f"{instructions}\n\n{context}"

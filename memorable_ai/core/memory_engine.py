@@ -19,6 +19,7 @@ go to a shared pool that user-scoped calls never see.
 """
 
 import hashlib
+from collections import OrderedDict
 import logging
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -394,11 +395,43 @@ class MemoryEngine:
             return await self._mode_handler.get_context(scope.session_id, list(messages), scope=scope)
         return await self._mode_handler.get_context(list(messages), scope=scope)
 
+    async def _reusable_context(self, messages: Sequence[Any], scope: Scope) -> str:
+        """
+        Memory for this call, reused while the latest user message is unchanged.
+
+        In an agent's tool loop every call repeats the same user message, so the memory block
+        comes back byte-identical: no repeated retrieval, and the provider's prompt cache stays
+        valid (prefix stability, as in billion-context's append-only fold). A new user message
+        is a new key; entries expire after ``context_reuse_seconds``.
+        """
+        import time
+
+        from memorable_ai.core.providers import last_user_text
+
+        ttl = getattr(self.config.memory, "context_reuse_seconds", 0) or 0
+        query = last_user_text(messages)
+        if ttl <= 0 or not query:
+            return await self._context_for(messages, scope)
+        key = (scope.namespace, scope.user_id, scope.session_id, scope.agent_id,
+               hashlib.sha1(query.encode("utf-8")).hexdigest())
+        cache = self.__dict__.setdefault("_context_cache", OrderedDict())
+        now = time.monotonic()
+        hit = cache.get(key)
+        if hit is not None and now - hit[0] < ttl:
+            cache.move_to_end(key)
+            return hit[1]
+        context = await self._context_for(messages, scope)
+        cache[key] = (now, context)
+        while len(cache) > 512:
+            cache.popitem(last=False)
+        return context
+
     async def _aprepare_call(self, adapter: Adapter, kwargs: Dict[str, Any]) -> PreparedCall:
         messages = adapter.get_messages(kwargs)
         scope = self.resolve_scope(messages=messages, hints=adapter.get_hints(kwargs))
-        context = await self._context_for(messages, scope) if messages else ""
-        new_kwargs = adapter.inject(kwargs, context) if context else kwargs
+        context = await self._reusable_context(messages, scope) if messages else ""
+        position = getattr(self.config.memory, "injection", "tail")
+        new_kwargs = adapter.inject(kwargs, context, position=position) if context else kwargs
         return PreparedCall(adapter, scope, messages, new_kwargs, context)
 
     def _prepare_call(self, adapter: Adapter, kwargs: Dict[str, Any]) -> PreparedCall:
@@ -423,7 +456,7 @@ class MemoryEngine:
     # ------------------------------------------------------------------ compatibility hooks
 
     async def _inject_context(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Return ``messages`` with memory context in a system message."""
+        """Return ``messages`` with memory context added (``config.memory.injection`` decides where)."""
         try:
             self._ensure_components()
             call = await self._aprepare_call(OpenAIChatAdapter(), {"messages": messages})
@@ -613,6 +646,33 @@ class MemoryEngine:
         messages = [{"role": "user", "content": query}] if isinstance(query, str) else list(query)
         scope = self.resolve_scope(user_id, session_id, messages)
         return await self._context_for(messages, scope)
+
+    def expand(self, kind: str, item_id: int, user_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Restore what a summary or fact came from, within the caller's scope.
+
+        ``kind="episode"`` returns the episode with its original turns in order;
+        ``kind="fact"`` returns the fact with the turns it was extracted from. Every summary
+        and fact stays reversible to verbatim text (a lesson from billion-context, where each
+        compressed block can be decompressed on demand). Another user's ids return ``{}``.
+        """
+        self._ensure_components()
+        uid = self._canonical(user_id or current_user())
+        shared = self._retrieval.include_shared if self._retrieval is not None else False
+        if kind == "episode":
+            eps = self._storage.hydrate_episodes([item_id], user_id=uid, include_shared=shared)
+            if not eps or self._episodic is None:
+                return {}
+            return {"episode": eps[0], "turns": self._episodic.episode_turns(int(item_id))}
+        if kind == "fact":
+            facts = self._storage.hydrate_memories([item_id], user_id=uid, include_shared=shared, include_invalid=True)
+            if not facts:
+                return {}
+            fact = facts[0]
+            fact.pop("embedding", None)
+            turns = self._storage.hydrate_turns(fact.get("source_turn_ids") or [], user_id=uid, include_shared=shared)
+            return {"fact": fact, "turns": turns}
+        raise ValueError(f"expand: unknown kind {kind!r} (use 'episode' or 'fact')")
 
     def history(self, memory_id: int) -> List[Dict[str, Any]]:
         """Version chain of a memory, oldest first."""

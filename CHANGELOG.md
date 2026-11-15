@@ -37,10 +37,12 @@ Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instru
   - **Score fusion** for the turn and episode layers (`RetrievalConfig.fusion = "score"`, the new default). Each signal's scores are z-normalised over the candidate pool. LoCoMo end to end: turn recall@5 0.642 → 0.701, episode recall@5 0.541 → 0.575. `fusion="rrf"` restores rank fusion. Non-semantic (hash) embedders keep RRF.
   - **Cross-encoder reranking of turn excerpts** (opt-in: `rerank=True`), with `rerank_depth` (20) and `rerank_blend` (0). `memorable_ai/core/rerank.py` runs rerankers on ONNX Runtime with identical scores, including modular cross-encoders such as the Ettin family. Ettin-17M adds +5.5 pts LoCoMo turn@5 at about 32–50 ms per query.
   - `VectorIndex.scores_for` / `Storage.vector_scores`: exact cosine for given ids.
+- `MemoryEngine.expand("episode" | "fact", id)`: restores the source turns behind an episode summary or a fact, scoped to the caller.
   - Benchmarks: `benchmarks/embeddings/turn_signals.py` (fusion rules, rerankers, bootstrap CIs on LoCoMo and LongMemEval) and `bench_rerank_latency.py`. `retrieval_eval.py` gains `turn/pipeline`, `--fusion` and `--rerank`.
   - `training/kaggle/`: synthetic memory-QA generation and contrastive / reranker fine-tuning jobs (Kaggle GPUs).
 
 ### Changed
+- **Memory injection is prompt-cache friendly** (`memory.injection="tail"`, the new default). Retrieved memory goes in front of the latest user message instead of into the system prompt. Everything before that message now stays byte-identical across turns, so provider prompt caches (OpenAI, Anthropic, Gemini) keep the whole conversation prefix; before, a changed memory block forced the whole history to be re-billed every turn. The memory block is reused while the latest user message is unchanged (`context_reuse_seconds`, 600), so agent tool loops send identical bytes and skip repeated retrieval. `injection="system"` restores the v0.2 placement. Adopted from billion-context; see `docs/procedural_memory_design.md` §17.
 - Python 3.10+ is required. 3.8 and 3.9 are past end of life, and current numpy, sentence-transformers and onnxruntime need 3.10+. CI now tests 3.10–3.14 with current GitHub Actions.
 
 ### Fixed (found by the G0 deep evaluation, `docs/g0_deep_evaluation.md`)

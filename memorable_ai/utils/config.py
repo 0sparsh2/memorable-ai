@@ -128,6 +128,18 @@ class MemoryConfig(BaseModel):
     max_context_tokens: int = Field(
         default=2000, description="Maximum tokens to inject as context"
     )
+    injection: str = Field(
+        default="tail",
+        description=(
+            "Where retrieved memory goes: 'tail' (in front of the latest user message; the rest of the "
+            "request stays byte-identical, so the provider's prompt cache keeps the conversation prefix) "
+            "or 'system' (system prompt / instructions, the v0.2 behaviour)"
+        ),
+    )
+    context_reuse_seconds: int = Field(
+        default=600,
+        description="Reuse the memory block while the latest user message is unchanged (tool loops); 0 = off",
+    )
     consolidation_interval: int = Field(
         default=21600, description="Memory consolidation interval in seconds (6 hours)"
     )
