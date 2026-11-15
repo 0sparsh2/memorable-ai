@@ -31,7 +31,7 @@ import numpy as np
 from memorable_ai.core.context import ContextBuilder
 from memorable_ai.core.episodic import message_text
 from memorable_ai.core.scope import Scope
-from memorable_ai.core.vector_index import reciprocal_rank_fusion, tokenize
+from memorable_ai.core.vector_index import reciprocal_rank_fusion, score_fusion, tokenize
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,11 @@ class HybridRetriever:
         rrf_k: int = 60,
         min_semantic_score: float = 0.2,
         rerank: bool = False,
-        rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        rerank_model: str = "cross-encoder/ms-marco-MiniLM-L6-v2",
+        fusion: str = "score",
+        fusion_weights: Optional[Dict[str, float]] = None,
+        rerank_depth: int = 20,
+        rerank_blend: float = 0.0,
         max_context_tokens: int = 2000,
         max_facts: int = 10,
         max_episodes: int = 3,
@@ -88,6 +92,11 @@ class HybridRetriever:
         self.rerank = rerank
         self.rerank_model = rerank_model
         self._reranker = None
+        # Turn and episode layers: "score" = z-normalised score fusion, "rrf" = rank fusion.
+        self.fusion = fusion
+        self.fusion_weights = fusion_weights or {"semantic": 1.0, "lexical": 0.5}
+        self.rerank_depth = rerank_depth
+        self.rerank_blend = rerank_blend
         self.include_shared = include_shared
         self.max_facts = max_facts
         self.max_episodes = max_episodes
@@ -192,45 +201,84 @@ class HybridRetriever:
         return fused[: max(k * 2, k)]
 
     def _rank_layer(
-        self, kind: str, query: str, qvec: Optional[np.ndarray], scope: Scope, k: int
+        self, kind: str, query: str, qvec: Optional[np.ndarray], scope: Scope, k: int,
+        pool: Optional[int] = None,
     ) -> List[int]:
-        pool = max(k * 4, 12)
-        lists: Dict[str, List[int]] = {}
+        return [i for i, _ in self._rank_layer_scored(kind, query, qvec, scope, k, pool)]
+
+    def _rank_layer_scored(
+        self, kind: str, query: str, qvec: Optional[np.ndarray], scope: Scope, k: int,
+        pool: Optional[int] = None,
+    ) -> List[Tuple[int, float]]:
+        pool = pool or max(k * 4, 12)
+        dense: Dict[int, float] = {}
         if qvec is not None:
             floor = self._dense_floor()
-            lists["semantic"] = [
-                i
+            dense = {
+                i: s
                 for i, s in self.storage.vector_search(
                     kind, qvec, k=pool, user_id=scope.user_id, include_shared=self.include_shared
                 )
                 if s >= floor
-            ]
-        lists["lexical"] = [
-            i
-            for i, _ in self.storage.lexical_search(
+            }
+        lexical = dict(
+            self.storage.lexical_search(
                 kind, query, k=pool, user_id=scope.user_id, include_shared=self.include_shared
             )
-        ]
-        fused = reciprocal_rank_fusion(
-            lists, {"semantic": self.semantic_weight, "lexical": self.bm25_weight}, k=self.rrf_k
         )
-        return [i for i, _ in fused]
+        # Score fusion trusts the dense margins, so it needs a semantic embedder; the hash
+        # fallback's cosines are noise and stay with rank fusion (BM25-weighted).
+        embedder = self.turn_embedder if kind == "turn" else self.embedder
+        if self.fusion == "score" and getattr(embedder, "is_semantic", False):
+            if qvec is not None:
+                missing = [i for i in lexical if i not in dense]
+                if missing:
+                    dense.update(self.storage.vector_scores(kind, qvec, missing))
+            fused = score_fusion({"semantic": dense, "lexical": lexical}, self.fusion_weights)
+        else:
+            lists = {"semantic": list(dense), "lexical": list(lexical)}
+            fused = reciprocal_rank_fusion(
+                lists, {"semantic": self.semantic_weight, "lexical": self.bm25_weight}, k=self.rrf_k
+            )
+        return fused
 
-    def _rerank(self, query: str, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _reranker_model(self):
+        if self._reranker is None:
+            from memorable_ai.core.rerank import load_reranker
+
+            self._reranker = load_reranker(self.rerank_model)
+        return self._reranker
+
+    def _rerank(
+        self,
+        query: str,
+        items: List[Dict[str, Any]],
+        first_stage: Optional[Sequence[float]] = None,
+        depth: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Cross-encoder rerank of the top ``depth`` items (the rest keep their order). With
+        ``rerank_blend`` > 0 and first-stage scores, the order is z(reranker) +
+        blend * z(first stage), which suits rerankers trained off-domain; 0 trusts the
+        reranker alone (best for the Ettin family on LoCoMo; docs/retrieval_round2.md).
+        """
         if not self.rerank or len(items) < 2:
             return items
+        depth = depth or len(items)
+        head, tail = items[:depth], items[depth:]
         try:
-            if self._reranker is None:
-                from sentence_transformers import CrossEncoder
-
-                self._reranker = CrossEncoder(self.rerank_model)
-            scores = self._reranker.predict([(query, m.get("content", "")) for m in items])
-            order = np.argsort(-np.asarray(scores))
-            return [items[i] for i in order]
+            scores = np.asarray(
+                self._reranker_model().predict([(query, m.get("content", "")) for m in head]), dtype=np.float64
+            ).reshape(len(head))
         except Exception as e:
             logger.debug("Rerank unavailable: %s", e)
             self.rerank = False
             return items
+        if self.rerank_blend > 0 and first_stage is not None:
+            z = lambda v: (v - v.mean()) / (v.std() or 1.0)  # noqa: E731
+            scores = z(scores) + self.rerank_blend * z(np.asarray(first_stage[: len(head)], dtype=np.float64))
+        order = np.argsort(-scores, kind="stable")
+        return [head[i] for i in order] + tail
 
     # ------------------------------------------------------------------ public API
 
@@ -263,15 +311,18 @@ class HybridRetriever:
                 f["score"] = score_of.get(f["id"], 0.0)
             if memory_type:
                 facts = [f for f in facts if f.get("type") == memory_type]
-            result["facts"] = self._rerank(query, facts)[:k_facts]
+            result["facts"] = self._rerank(query, facts, [f["score"] for f in facts])[:k_facts]
         if k_episodes:
             ids = self._rank_layer("episode", query, qvec, scope, k_episodes)
             eps = self.storage.hydrate_episodes(ids, user_id=uid, include_shared=self.include_shared)
             result["episodes"] = [e for e in eps if e.get("status") == "closed"][:k_episodes]
         if k_excerpts:
             tvec = qvec if self.turn_embedder is self.embedder else self._encode(query, kind="turn")
-            ids = self._rank_layer("turn", query, tvec, scope, k_excerpts * 3)
-            turns = self.storage.hydrate_turns(ids, user_id=uid, include_shared=self.include_shared)
+            ranked = self._rank_layer_scored(
+                "turn", query, tvec, scope, k_excerpts * 3, pool=max(k_excerpts * 12, self.rerank_depth * 2)
+            )
+            first = dict(ranked)
+            turns = self.storage.hydrate_turns([i for i, _ in ranked], user_id=uid, include_shared=self.include_shared)
             # The current session is already in the prompt; excerpts come from other sessions.
             candidates = [
                 t
@@ -279,6 +330,9 @@ class HybridRetriever:
                 if (not scope.session_id or t.get("session_id") != scope.session_id)
                 and len(tokenize(t.get("content", ""))) >= 4
             ]
+            candidates = self._rerank(
+                query, candidates, [first.get(t["id"], 0.0) for t in candidates], depth=self.rerank_depth
+            )
             # Demote turns a returned fact was extracted from (provenance): usually redundant,
             # but kept as a fallback because a turn can hold more than its extracted facts.
             covered = {tid for f in result["facts"] for tid in (f.get("source_turn_ids") or [])}

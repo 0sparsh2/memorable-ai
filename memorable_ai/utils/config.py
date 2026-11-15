@@ -53,8 +53,13 @@ class ExtractionConfig(BaseModel):
 
 class RetrievalConfig(BaseModel):
     """
-    Retrieval fusion. Weights are relative weights in weighted Reciprocal Rank
-    Fusion (score = sum w / (rrf_k + rank)), so their scale does not matter.
+    Retrieval fusion.
+
+    Turn and episode layers default to score fusion: each signal's scores are
+    z-normalised over the candidate pool and summed with ``fusion_weights``. The fact
+    layer (dense + BM25 + graph) uses weighted Reciprocal Rank Fusion
+    (score = sum w / (rrf_k + rank)) with ``semantic_weight`` / ``bm25_weight`` /
+    ``graph_weight``, as do all layers when ``fusion="rrf"``.
     """
 
     # Defaults from benchmarks/locomo/retrieval_eval.py with MiniLM: BM25 beat MiniLM
@@ -65,6 +70,14 @@ class RetrievalConfig(BaseModel):
     entity_weight: float = Field(default=0.0, description="Deprecated: entity matching now seeds the graph signal")
     graph_weight: float = Field(default=0.6)
     rrf_k: int = Field(default=60)
+    fusion: str = Field(
+        default="score",
+        description="Turn/episode fusion: 'score' (z-normalised scores, +5 pts LoCoMo recall@5) or 'rrf'",
+    )
+    fusion_weights: Dict[str, float] = Field(
+        default_factory=lambda: {"semantic": 1.0, "lexical": 0.5},
+        description="Score-fusion weights per signal (docs/retrieval_round2.md)",
+    )
     max_facts: int = Field(default=10, description="Facts injected per call")
     max_episodes: int = Field(default=3, description="Past-episode summaries injected per call")
     max_excerpts: int = Field(default=3, description="Verbatim past-turn excerpts injected per call")
@@ -74,8 +87,15 @@ class RetrievalConfig(BaseModel):
     min_semantic_score: float = Field(
         default=0.2, description="Dense hits below this cosine are dropped before fusion"
     )
-    rerank: bool = Field(default=False, description="Cross-encoder rerank of fused candidates")
-    rerank_model: str = Field(default="cross-encoder/ms-marco-MiniLM-L-6-v2")
+    rerank: bool = Field(default=False, description="Cross-encoder rerank of fused fact and turn candidates")
+    rerank_model: str = Field(
+        default="cross-encoder/ms-marco-MiniLM-L6-v2",
+        description="Reranker spec (ONNX Runtime when available; 'torch:' or 'onnx-int8:' prefixes as for embedders)",
+    )
+    rerank_depth: int = Field(default=20, description="Turn candidates the reranker reads per query")
+    rerank_blend: float = Field(
+        default=0.0, description="Weight of the first-stage score blended into the reranker's (0 = reranker only)"
+    )
     include_shared: bool = Field(
         default=False, description="Let user-scoped calls also see memories stored without a user"
     )

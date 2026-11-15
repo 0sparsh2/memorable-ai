@@ -520,6 +520,10 @@ class Storage:
             return index.search(query_vec, k)
         return index.search(query_vec, k, user_id=user_id, include_shared=include_shared)
 
+    def vector_scores(self, kind: str, query_vec: Sequence[float], ids: Iterable[int]) -> Dict[int, float]:
+        """Exact cosine for specific rows (used to score lexical-only candidates in score fusion)."""
+        return self._sync_vector(kind).scores_for(query_vec, ids)
+
     def lexical_search(
         self,
         kind: str,

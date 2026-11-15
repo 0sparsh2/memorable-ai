@@ -50,6 +50,7 @@ class VectorIndex:
         self._id_arr: Optional[np.ndarray] = None
         self._dead: Set[int] = set()
         self._id_set: Set[int] = set()
+        self._pos: Dict[int, int] = {}  # id -> row (rows are append-only; removal only marks dead)
         self._dim: Optional[int] = None
         self.loaded: bool = False
 
@@ -71,6 +72,7 @@ class VectorIndex:
             norm = float(np.linalg.norm(vec))
             if norm == 0:
                 return
+            self._pos[item_id] = len(self._ids)
             self._ids.append(item_id)
             self._id_set.add(item_id)
             self._users.append(_ukey(user_id))
@@ -123,6 +125,23 @@ class VectorIndex:
                 for i in top
                 if np.isfinite(scores[i])
             ]
+
+
+    def scores_for(self, query: Sequence[float], ids: Iterable[int]) -> Dict[int, float]:
+        """Exact cosine of ``query`` with specific rows (ids not indexed, or removed, are skipped)."""
+        q = np.asarray(query, dtype=np.float32)
+        with self._lock:
+            self._materialize()
+            if self._matrix is None or self._dim is None or q.size != self._dim:
+                return {}
+            qn = float(np.linalg.norm(q))
+            if qn == 0:
+                return {}
+            rows = [(int(i), self._pos[int(i)]) for i in ids if int(i) in self._pos and int(i) not in self._dead]
+            if not rows:
+                return {}
+            sims = self._matrix[[r for _, r in rows]] @ (q / qn)
+            return {i: float(s) for (i, _), s in zip(rows, sims)}
 
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -224,6 +243,37 @@ class LexicalIndex:
                     scores[doc] += idf * tf * (self.k1 + 1) / denom
             ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
             return ranked[:k]
+
+
+def score_fusion(
+    scored: Dict[str, Dict[int, float]],
+    weights: Optional[Dict[str, float]] = None,
+) -> List[Tuple[int, float]]:
+    """
+    Calibrated score fusion: z-normalise each signal's scores over the candidate pool
+    (the union of every signal's candidates), then take the weighted sum.
+
+    A candidate a signal did not score counts as 0 for it, which is right for BM25 (no
+    matching term, or below its top-k); callers fill in exact dense scores for
+    lexical-only candidates. Unlike RRF, the result keeps how decisively each signal
+    prefers a candidate: on LoCoMo turns it beats RRF by about 5 points of recall@5 with
+    the same two signals (docs/retrieval_round2.md).
+    """
+    weights = weights or {}
+    pool = sorted({i for s in scored.values() for i in s})
+    if not pool:
+        return []
+    total = np.zeros(len(pool))
+    for name, s in scored.items():
+        w = weights.get(name, 1.0)
+        if w <= 0 or not s:
+            continue
+        v = np.array([s.get(i, 0.0) for i in pool], dtype=np.float64)
+        sd = float(v.std())
+        if sd > 0:
+            total += w * (v - v.mean()) / sd
+    order = np.argsort(-total, kind="stable")
+    return [(pool[i], float(total[i])) for i in order]
 
 
 def reciprocal_rank_fusion(
