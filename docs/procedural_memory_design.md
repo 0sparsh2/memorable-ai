@@ -466,3 +466,29 @@ An application can pin a procedure to `user` (`tier_lock`), or add a `team` tier
 | **Storage growth from full payloads** | 256 KB cap, `retention.raw_days`, cascade deletion; payload columns can move to a blob store later (backends track) |
 | **Privacy across users** | private by default; promotion to `org` only after generalisation and evidence from at least 2 users or approval; slots, memory patterns, secret/PII scan; `tier_lock`; reversible `demote()` |
 | **Hot-path latency** | matching is SQL + index lookups (target < 20 ms); compilation and the LLM run on the background worker |
+
+## 17. Lessons adopted from billion-context (November 2026)
+
+[billion-context](https://github.com/ranxianglei/billion-context) (MIT) manages a coding agent's context **within** one session: model-driven, incremental, tiered summaries that can be restored on demand. It solves a different problem from cross-session memory, so it is neither a dependency nor a competitor. Its benchmark claims are self-reported. Five of its ideas carry over:
+
+| Lesson | What we do with it | Status |
+|---|---|---|
+| **Never rewrite the prefix.** Its fold keeps the provider's prompt cache valid (94% cache-read share) by changing only the tail. | The interceptor now puts memory in front of the latest user message (`memory.injection="tail"`, the default). The memory block is reused while that message is unchanged (`context_reuse_seconds`), so an agent's tool-loop calls send identical bytes. Tests check the conversation prefix stays byte-identical across turns. | Shipped |
+| **Every summary is reversible.** Each compressed block can be decompressed to its source text. | `MemoryEngine.expand("episode" \| "fact", id)` returns the source turns, within the caller's scope. Task summaries and procedures (§7) must carry source refs, so this works for them too. | Shipped (episodes, facts); P2 for procedures |
+| **Compress each increment once, never re-summarize history.** Re-summarizing everything each round makes early content decay geometrically (ρ^k). Folding each piece once keeps retention constant. | Episodes already close once. Future roll-ups (episode → session → topic, G4) fold *summaries* and never re-read raw history. A turn is summarized exactly once in its life. | Design rule |
+| **Compress between task steps, not mid-step** (its growth-gated nudge). | `TaskTracker` (§6) never closes or summarizes a task inside a tool burst. It closes at a tool-free answer, the next user message, or the idle gap, as specified. | P1 |
+| **Models rarely call recovery tools unprompted** (its own pilot finding). | Keep automatic injection as the default. If an `expand` tool is exposed to agents, the injected block names it explicitly. | Design rule |
+
+**Task-summary spec for P1/P2.** Adapted from billion-context's compression doctrine (`acp-kernel/DESIGN-prompts.md`).
+- **Keep verbatim:**
+  - file paths with line numbers
+  - signatures and load-bearing code lines
+  - exact error strings
+  - decisions *with their rationale*
+  - exact values
+  - how the goal evolved
+  - source turn ids (for `expand`)
+- **Drop:** verbose logs once their result is extracted, duplicate reads, and the step-by-step path to a conclusion.
+- **Dead ends:** drop the exploration but keep the lesson; it becomes a `pitfall` (§7.1, failed-then-fixed).
+- **When the budget is tight, keep in this order:** goal, then decisions with rationale, then artifacts, then conclusions, then lessons.
+
