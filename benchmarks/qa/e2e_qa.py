@@ -333,6 +333,7 @@ class Ledger:
         self.f = open(path, "a")
 
     def add(self, rec: Dict[str, Any]) -> None:
+        rec.setdefault("ts", round(time.time(), 1))  # lets the quota window be measured afterwards
         self.spent += rec["cost"]
         self.f.write(json.dumps(rec) + "\n")
         self.f.flush()
@@ -398,7 +399,9 @@ async def _complete(msgs, *, effort: str, max_tokens: int):
         b = r.json()
         msg, u = b["choices"][0]["message"], b.get("usage") or {}
         return (msg.get("content") or "").strip(), {"in": int(u.get("prompt_tokens") or 0), "cached": 0,
-                                                    "out": int(u.get("completion_tokens") or 0), "reasoning": 0}
+                                                    "out": int(u.get("completion_tokens") or 0), "reasoning": 0,
+                                                    "served_model": b.get("model"),
+                                                    "fingerprint": b.get("system_fingerprint")}
     import litellm
 
     resp = await litellm.acompletion(model=MODEL, messages=msgs, temperature=0, max_tokens=max_tokens,
@@ -595,8 +598,63 @@ async def cmd_answer(args) -> None:
         await asyncio.gather(*(worker(out) for _ in range(args.concurrency)))
     if stop["reason"]:
         print(f"STOP: {stop['reason']}", flush=True)
-    print(json.dumps({"answered": done_n, "queued": len(recs), "remaining": len(recs) - done_n,
-                      "spent_usd": round(ledger.spent, 4), "wall_s": round(time.time() - t0)}))
+    summary = {"answered": done_n, "queued": len(recs), "remaining": len(recs) - done_n,
+               "spent_usd": round(ledger.spent, 4), "wall_s": round(time.time() - t0), "stop": stop["reason"]}
+    print(json.dumps(summary), flush=True)
+    return summary
+
+
+CONTROL_MODEL = "nvidia/nemotron-3.5-bolt-e4b"  # a second NIM model: is a 429 per model or per account?
+
+
+async def _probe(model: Optional[str] = None) -> str:
+    """One minimal call: "ok", "limited" (429) or "error"."""
+    global MODEL
+    saved = MODEL
+    try:
+        if model:
+            MODEL = f"nvidia_nim/{model}"
+        await _complete([{"role": "user", "content": "Reply OK."}], effort="minimal", max_tokens=5)
+        return "ok"
+    except Exception as e:  # noqa: BLE001
+        return "limited" if "429" in str(e) else "error"
+    finally:
+        MODEL = saved
+
+
+async def cmd_answer_loop(args) -> None:
+    """
+    Chunked run under a provider quota (owner's choice, prereg v3 amendment): probe every
+    --probe-every seconds; when a call goes through, resume the answer stage until the next
+    persistent 429; repeat until nothing is left. Each chunk is logged to chunks.jsonl, which
+    shows the quota window's length. While blocked, a second NIM model is probed too, which
+    tells a per-model limit from an account-wide one. Contexts added to the run dir later (e.g. the
+    LongMemEval ones from Kaggle) are picked up at the next chunk.
+    """
+    run = Path(args.run)
+    (run / "answer_loop.pid").write_text(str(os.getpid()))
+    deadline = time.time() + args.max_hours * 3600
+    while time.time() < deadline:
+        status = await _probe()
+        stamp = datetime.now().isoformat(timespec="seconds")
+        if status != "ok":
+            rec = {"ts": stamp, "probe": status}
+            if status == "limited" and MODEL.startswith("nvidia_nim/"):
+                rec["control_model"] = CONTROL_MODEL
+                rec["control_probe"] = await _probe(CONTROL_MODEL)  # ok -> the limit is per model
+            with open(run / "chunks.jsonl", "a") as f:
+                f.write(json.dumps(rec) + "\n")
+            await asyncio.sleep(args.probe_every)
+            continue
+        t = time.time()
+        summary = await cmd_answer(args)
+        with open(run / "chunks.jsonl", "a") as f:
+            f.write(json.dumps({"ts": stamp, "probe": "ok", "chunk_s": round(time.time() - t), **summary}) + "\n")
+        if summary["remaining"] == 0 and not summary["stop"]:
+            print("all queued items answered", flush=True)
+            break
+        await asyncio.sleep(args.probe_every)
+    (run / "answer_loop.pid").unlink(missing_ok=True)
 
 
 # ------------------------------------------------------------------ decoys
@@ -738,7 +796,7 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=0, help="first N conversations / haystacks only")
     p.add_argument("--a0-dev", action="store_true", help="also build full-context (A0) prompts for LME dev rows")
     p.add_argument("--shard", default="", help="i/n: process every n-th conversation/haystack (parallel workers)")
-    for name in ("answer", "decoys", "report"):
+    for name in ("answer", "answer-loop", "decoys", "report"):
         p = sub.add_parser(name)
         p.add_argument("--run", required=True)
         p.add_argument("--stub", action="store_true", help="no API calls; deterministic fake answers and verdicts")
@@ -746,15 +804,20 @@ def main() -> None:
         p.add_argument("--concurrency", type=int, default=8)
         p.add_argument("--rpm", type=float, default=35.0,
                        help="requests-per-minute ceiling; NIM's free tier sustains ~40 (0 = none)")
-        if name == "answer":
+        if name in ("answer", "answer-loop"):
             p.add_argument("--arms", default="")
             p.add_argument("--split", default="")
             p.add_argument("--per-arm", type=int, default=0, help="pilot: N items per (bench, arm)")
+        if name == "answer-loop":
+            p.add_argument("--probe-every", type=float, default=300, help="seconds between quota probes")
+            p.add_argument("--max-hours", type=float, default=24 * 21, help="give up after this long")
     args = ap.parse_args()
     if args.cmd == "retrieve":
         asyncio.run(cmd_retrieve(args))
     elif args.cmd == "answer":
         asyncio.run(cmd_answer(args))
+    elif args.cmd == "answer-loop":
+        asyncio.run(cmd_answer_loop(args))
     elif args.cmd == "decoys":
         asyncio.run(cmd_decoys(args))
     else:
