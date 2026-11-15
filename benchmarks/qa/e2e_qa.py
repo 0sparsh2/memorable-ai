@@ -416,16 +416,25 @@ async def llm_call(prompt: str, *, system: Optional[str], effort: str, max_token
         return stub, {"in": len(prompt) // 4, "cached": 0, "out": len(stub) // 4, "reasoning": 0}
     msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
     last = None
-    for attempt in range(4):
+    # Rate limits back off for minutes (NIM's free tier enforces a sustained ~40 requests/min,
+    # with short bursts allowed); other transient errors retry briefly.
+    waits_429, waits_other = (15, 30, 60, 120, 180), (5, 10, 20)
+    n429 = nother = 0
+    while True:
         try:
             await LIMITER.wait()
             return await _complete(msgs, effort=effort, max_tokens=max_tokens)
         except Exception as e:  # noqa: BLE001 - provider errors vary
             last = e
             msg = str(e).lower()
-            if attempt < 3 and any(x in msg for x in ("429", "rate", "503", "502", "500", "overloaded", "timeout",
-                                                       "timed out", "readtimeout")):
-                await asyncio.sleep(5 * 2**attempt)
+            if ("429" in msg or "too many requests" in msg or "rate" in msg) and n429 < len(waits_429):
+                await asyncio.sleep(waits_429[n429])
+                n429 += 1
+                continue
+            if any(x in msg for x in ("503", "502", "500", "overloaded", "timeout", "timed out", "readtimeout")) \
+                    and nother < len(waits_other):
+                await asyncio.sleep(waits_other[nother])
+                nother += 1
                 continue
             break
     raise StopRun(f"LLM error after retries: {type(last).__name__}: {str(last)[:300]}")
@@ -554,22 +563,40 @@ async def cmd_answer(args) -> None:
                 seen[key] += 1
                 keep.append(r)
         recs = keep
-    random.Random(0).shuffle(recs)  # judge calls for all arms interleaved (blinding)
+    random.Random(0).shuffle(recs)  # arms interleaved, so judge calls never arrive grouped by arm (blinding)
     sem = asyncio.Semaphore(args.concurrency)
+    queue: asyncio.Queue = asyncio.Queue()
+    for r in recs:
+        queue.put_nowait(r)
     t0 = time.time()
+    done_n, stop = 0, {"reason": None}
+
+    # A worker finishes one question (answer, then its judges, then a line on disk) before taking
+    # the next, so a stop loses at most the questions in flight and the run resumes from disk.
+    async def worker(out):
+        nonlocal done_n
+        while stop["reason"] is None:
+            try:
+                r = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            try:
+                res = await answer_one(r, ledger, args.stub, sem)
+            except StopRun as e:
+                stop["reason"] = str(e)
+                return
+            out.write(json.dumps(res) + "\n")
+            out.flush()
+            done_n += 1
+            if done_n % 100 == 0:
+                print(f"  {done_n}/{len(recs)} answered, ${ledger.spent:.2f}, {time.time() - t0:.0f}s", flush=True)
+
     with open(done_path, "a") as out:
-        tasks = [asyncio.create_task(answer_one(r, ledger, args.stub, sem)) for r in recs]
-        try:
-            for i, fut in enumerate(asyncio.as_completed(tasks), 1):
-                out.write(json.dumps(await fut) + "\n")
-                out.flush()
-                if i % 100 == 0:
-                    print(f"  {i}/{len(recs)} answered, ${ledger.spent:.2f}, {time.time() - t0:.0f}s", flush=True)
-        except StopRun as e:
-            for t in tasks:
-                t.cancel()
-            print(f"STOP: {e}", flush=True)
-    print(json.dumps({"answered": len(recs), "spent_usd": round(ledger.spent, 4), "wall_s": round(time.time() - t0)}))
+        await asyncio.gather(*(worker(out) for _ in range(args.concurrency)))
+    if stop["reason"]:
+        print(f"STOP: {stop['reason']}", flush=True)
+    print(json.dumps({"answered": done_n, "queued": len(recs), "remaining": len(recs) - done_n,
+                      "spent_usd": round(ledger.spent, 4), "wall_s": round(time.time() - t0)}))
 
 
 # ------------------------------------------------------------------ decoys
@@ -717,7 +744,8 @@ def main() -> None:
         p.add_argument("--stub", action="store_true", help="no API calls; deterministic fake answers and verdicts")
         p.add_argument("--cap", type=float, default=CAP_USD)
         p.add_argument("--concurrency", type=int, default=8)
-        p.add_argument("--rpm", type=float, default=35.0, help="request-per-minute ceiling (0 = none)")
+        p.add_argument("--rpm", type=float, default=35.0,
+                       help="requests-per-minute ceiling; NIM's free tier sustains ~40 (0 = none)")
         if name == "answer":
             p.add_argument("--arms", default="")
             p.add_argument("--split", default="")
