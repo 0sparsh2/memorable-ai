@@ -123,6 +123,63 @@ class MemoryConfig(BaseModel):
     )
 
 
+# Embedding profiles (docs/embedding_study.md §4, LoCoMo full pipeline vs v0.2):
+#   quality: leaf-ir turns   -> fused turn recall 0.565 -> 0.642, multi-hop 0.504 -> 0.571, ingest 46 -> 39 s
+#   fast:    static turns    -> fused 0.579, ingest 46 -> 25 s, query 7.9 -> 3.2 ms
+#   legacy:  one model for everything (v0.2 behaviour)
+# Facts, episodes and extractive summaries keep the main model in every profile;
+# segmentation uses the static model whenever it is available.
+DEFAULT_TURN_EMBEDDING_MODEL = "static:minishlab/potion-base-32M"  # fast profile / segmentation
+QUALITY_TURN_EMBEDDING_MODEL = "MongoDB/mdbr-leaf-ir"
+
+
+def _installed(module: str) -> bool:
+    try:
+        import importlib.util
+
+        return importlib.util.find_spec(module) is not None
+    except Exception:
+        return False
+
+
+def _is_hash(model: str) -> bool:
+    return (model or "").lower() in ("hash", "hashing", "hash-384")
+
+
+def _resolve_turn_embedding_model(main_model: str) -> Optional[str]:
+    """
+    Turn-tier embedder. Explicit env wins ('none'/'off' disables tiering). Otherwise
+    ``MEMORABLE_EMBEDDING_PROFILE`` (default ``quality``) picks it, provided the
+    ``fast`` extra's runtimes are installed; without them, the main model is used.
+    """
+    env = os.getenv("MEMORABLE_LLM__TURN_EMBEDDING_MODEL")
+    if env is not None:
+        return None if env.strip().lower() in ("", "none", "off", "same") else env
+    if _is_hash(main_model):
+        return None
+    profile = os.getenv("MEMORABLE_EMBEDDING_PROFILE", "quality").strip().lower()
+    if profile == "legacy":
+        return None
+    if profile == "quality" and _installed("onnxruntime"):
+        return QUALITY_TURN_EMBEDDING_MODEL
+    if _installed("model2vec"):
+        return DEFAULT_TURN_EMBEDDING_MODEL
+    return None
+
+
+def _resolve_segment_embedding_model(main_model: str) -> Optional[str]:
+    """
+    Segmentation embedder: explicit env, else the static model if available, else
+    None, which means the *main* model (never the turn model; see EpisodicMemory).
+    """
+    env = os.getenv("MEMORABLE_LLM__SEGMENT_EMBEDDING_MODEL")
+    if env is not None:
+        return None if env.strip().lower() in ("", "none", "off", "same") else env
+    if _is_hash(main_model) or os.getenv("MEMORABLE_EMBEDDING_PROFILE", "").strip().lower() == "legacy":
+        return None
+    return DEFAULT_TURN_EMBEDDING_MODEL if _installed("model2vec") else None
+
+
 def _resolve_default_model() -> str:
     """Pick LLM model from env (NVIDIA NIM catalog-aware). 'none' disables LLM features."""
     from memorable_ai.integrations.nvidia_nim import resolve_memory_model
@@ -161,6 +218,22 @@ class LLMConfig(BaseModel):
     embedding_model: str = Field(
         default="sentence-transformers/all-MiniLM-L6-v2",
         description="Embedding model for semantic search",
+    )
+    segment_embedding_model: Optional[str] = Field(
+        default=None,
+        description=(
+            "Embedder for episode segmentation (topic-shift surprise). Thresholds are cosine "
+            "distances, so this is kept independent of the turn index model; defaults to the "
+            "static model when model2vec is installed, else the turn embedder."
+        ),
+    )
+    turn_embedding_model: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional fast embedder for the high-volume turn tier (L0 index, segmentation, "
+            "extractive summaries), e.g. 'static:minishlab/potion-base-8M'. Facts and episodes "
+            "keep embedding_model. See docs/embedding_study.md."
+        ),
     )
 
 
@@ -215,6 +288,12 @@ class MemorableConfig(BaseModel):
                 embedding_model=os.getenv(
                     "MEMORABLE_LLM__EMBEDDING_MODEL",
                     "sentence-transformers/all-MiniLM-L6-v2",
+                ),
+                turn_embedding_model=_resolve_turn_embedding_model(
+                    os.getenv("MEMORABLE_LLM__EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+                ),
+                segment_embedding_model=_resolve_segment_embedding_model(
+                    os.getenv("MEMORABLE_LLM__EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
                 ),
             ),
         )

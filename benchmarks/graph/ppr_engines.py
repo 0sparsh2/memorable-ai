@@ -136,7 +136,16 @@ def overlap(a, b, k=20):
 
 def run(label, n_queries=30):
     n_facts, n_ents = SIZES[label]
-    path = os.path.join(tempfile.mkdtemp(prefix="memorable_ppr_"), f"{label}.db")
+    tmp = tempfile.mkdtemp(prefix="memorable_ppr_")
+    try:
+        _run(label, n_queries, n_facts, n_ents, os.path.join(tmp, f"{label}.db"))
+    finally:
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _run(label, n_queries, n_facts, n_ents, path):
     st, perm, n_edges, rng, rng_np = build(n_facts, n_ents, path)
     eng = GraphEngine(st)
     t = time.perf_counter()

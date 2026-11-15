@@ -238,6 +238,9 @@ class Edge(Base):
     created_at = Column(DateTime, default=utcnow)
     invalidated_at = Column(DateTime, nullable=True, index=True)
     superseded_by_id = Column(Integer, nullable=True)
+    # Graph write sequence of the transaction that last inserted/invalidated this edge.
+    # Allocated under the DB write lock, so it follows commit order (unlike timestamps).
+    seq = Column(Integer, nullable=True)
     evidence_kind = Column(String(16), nullable=True)
     evidence_id = Column(Integer, nullable=True)
     source = Column(String(16), nullable=True)
@@ -250,16 +253,32 @@ class Edge(Base):
         Index("ix_edges_scope", "namespace", "user_id", "kind", "invalidated_at"),
         Index("ix_edges_evidence", "evidence_kind", "evidence_id"),
         Index("ix_edges_predicate", "kind", "predicate"),
+        Index("ix_edges_sync", "namespace", "user_id", "seq"),
     )
 
 
 class MemorableMeta(Base):
-    """Tiny key/value table for cross-process signals (e.g. ``graph_epoch``)."""
+    """Tiny key/value table for settings and markers."""
 
     __tablename__ = "memorable_meta"
 
     key = Column(String(64), primary_key=True)
     value = Column(String(255), nullable=True)
+
+
+class Counter(Base):
+    """
+    Integer counters bumped with an atomic ``UPDATE ... SET value = value + 1``.
+
+    ``graph_seq`` orders graph writes and ``graph_epoch`` signals hard deletes. The
+    increment runs in SQL, not as a Python read-modify-write: two concurrent writers
+    must never end up with the same value (found by the concurrency test).
+    """
+
+    __tablename__ = "memorable_counters"
+
+    key = Column(String(64), primary_key=True)
+    value = Column(Integer, nullable=False, default=0)
 
 
 class IdentityAlias(Base):

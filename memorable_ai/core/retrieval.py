@@ -62,11 +62,14 @@ class HybridRetriever:
         max_excerpts: int = 3,
         include_shared: bool = False,
         profile_facts: int = 3,
+        turn_embedding_model: Any = None,
     ):
         from memorable_ai.core.embeddings import as_embedder, get_embedder
 
         self.storage = storage
         self.embedder = as_embedder(embedding_model) if embedding_model is not None else get_embedder()
+        # Queries against the turn layer must use the embedder that indexed it.
+        self.turn_embedder = as_embedder(turn_embedding_model) if turn_embedding_model is not None else self.embedder
         # Back-compat: callers test ``retriever.embedding_model`` for truthiness.
         self.embedding_model = self.embedder
         self.embedding_model_name = getattr(self.embedder, "model_name", str(embedding_model))
@@ -121,7 +124,15 @@ class HybridRetriever:
             query = f"{user_msgs[1]}\n{query}"
         return query[-2000:]
 
-    def _encode(self, query: str) -> Optional[np.ndarray]:
+    def _encode(self, query: str, kind: Optional[str] = None) -> Optional[np.ndarray]:
+        if kind == "turn" and self.turn_embedder is not self.embedder:
+            if self.turn_embedder is None:
+                return None
+            try:
+                return self.turn_embedder.encode_query(query)
+            except Exception as e:
+                logger.debug("Turn query embedding failed: %s", e)
+                return None
         if self.embedder is None:
             return None
         try:
@@ -258,7 +269,8 @@ class HybridRetriever:
             eps = self.storage.hydrate_episodes(ids, user_id=uid, include_shared=self.include_shared)
             result["episodes"] = [e for e in eps if e.get("status") == "closed"][:k_episodes]
         if k_excerpts:
-            ids = self._rank_layer("turn", query, qvec, scope, k_excerpts * 3)
+            tvec = qvec if self.turn_embedder is self.embedder else self._encode(query, kind="turn")
+            ids = self._rank_layer("turn", query, tvec, scope, k_excerpts * 3)
             turns = self.storage.hydrate_turns(ids, user_id=uid, include_shared=self.include_shared)
             # The current session is already in the prompt; excerpts come from other sessions.
             candidates = [

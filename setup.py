@@ -68,9 +68,17 @@ setup(
             "flake8>=6.0.0",
             "mypy>=1.0.0",
             "matplotlib>=3.7.0",
+            "hypothesis>=6.100.0",
         ],
         "research": [
             "matplotlib>=3.7.0",
+        ],
+        # docs/embedding_study.md: ONNX backend (same vectors, 2-6x faster), static
+        # turn-tier embeddings (~30x faster ingest), numba push-PPR kernel.
+        "fast": [
+            "onnxruntime>=1.20.0",
+            "model2vec>=0.6.0",
+            "numba>=0.60.0",
         ],
         "all": [
             "neo4j>=5.0.0",
@@ -78,6 +86,10 @@ setup(
             "pytest>=7.0.0",
             "pytest-cov>=4.0.0",
             "pytest-asyncio>=0.21.0",
+            "onnxruntime>=1.20.0",
+            "model2vec>=0.6.0",
+            "numba>=0.60.0",
+            "hypothesis>=6.100.0",
         ],
     },
 )

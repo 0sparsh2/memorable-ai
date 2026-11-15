@@ -95,3 +95,9 @@ build/
 dist/
 *.egg
 
+
+# LongMemEval dataset (downloaded)
+benchmarks/longmemeval/data/
+
+# Hypothesis example database
+.hypothesis/

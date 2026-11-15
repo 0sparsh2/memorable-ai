@@ -1,0 +1,107 @@
+[
+  {
+    "model": "static:minishlab/potion-base-32M",
+    "query_prompt": false,
+    "load_s": 0.4,
+    "bulk_ms_per_text": 0.049,
+    "single_query_ms_p50": 0.04,
+    "locomo_recall@5": 0.4427,
+    "locomo_recall@5_blend": 0.487,
+    "locomo_by_cat_blend": {
+      "overall": 0.487,
+      "2": 0.4579,
+      "3": 0.2391,
+      "1": 0.4433,
+      "4": 0.5398
+    },
+    "lme_turn@10": {
+      "knowledge-update": 0.96,
+      "multi-session": 1.0,
+      "overall": 0.907,
+      "single-session-assistant": 0.96,
+      "single-session-preference": 0.68,
+      "single-session-user": 1.0,
+      "temporal-reasoning": 0.84
+    },
+    "lme_session@5": {
+      "knowledge-update": 1.0,
+      "multi-session": 1.0,
+      "overall": 0.96,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 0.8,
+      "single-session-user": 1.0,
+      "temporal-reasoning": 0.96
+    },
+    "lme_encode_s": 4.8
+  },
+  {
+    "model": "sentence-transformers/static-retrieval-mrl-en-v1",
+    "query_prompt": true,
+    "load_s": 2.9,
+    "bulk_ms_per_text": 0.081,
+    "single_query_ms_p50": 0.64,
+    "locomo_recall@5": 0.2799,
+    "locomo_recall@5_blend": 0.3275,
+    "locomo_by_cat_blend": {
+      "overall": 0.3275,
+      "2": 0.3302,
+      "3": 0.1413,
+      "1": 0.227,
+      "4": 0.3805
+    },
+    "lme_turn@10": {
+      "knowledge-update": 0.96,
+      "multi-session": 1.0,
+      "overall": 0.913,
+      "single-session-assistant": 0.96,
+      "single-session-preference": 0.76,
+      "single-session-user": 1.0,
+      "temporal-reasoning": 0.8
+    },
+    "lme_session@5": {
+      "knowledge-update": 1.0,
+      "multi-session": 1.0,
+      "overall": 0.967,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 0.88,
+      "single-session-user": 1.0,
+      "temporal-reasoning": 0.92
+    },
+    "lme_encode_s": 23.5
+  },
+  {
+    "model": "MongoDB/mdbr-leaf-ir",
+    "query_prompt": true,
+    "load_s": 0.2,
+    "bulk_ms_per_text": 0.821,
+    "single_query_ms_p50": 6.57,
+    "locomo_recall@5": 0.6211,
+    "locomo_recall@5_blend": 0.61,
+    "locomo_by_cat_blend": {
+      "overall": 0.61,
+      "2": 0.6262,
+      "3": 0.3913,
+      "1": 0.5532,
+      "4": 0.6468
+    },
+    "lme_turn@10": {
+      "knowledge-update": 1.0,
+      "multi-session": 0.88,
+      "overall": 0.887,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 0.76,
+      "single-session-user": 0.96,
+      "temporal-reasoning": 0.72
+    },
+    "lme_session@5": {
+      "knowledge-update": 1.0,
+      "multi-session": 1.0,
+      "overall": 0.953,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 0.84,
+      "single-session-user": 1.0,
+      "temporal-reasoning": 0.88
+    },
+    "lme_encode_s": 769.5
+  }
+]

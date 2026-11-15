@@ -178,11 +178,20 @@ class EpisodicMemory:
         llm_model: Optional[str] = None,
         config: Any = None,
         knowledge_graph: Any = None,
+        turn_embedder: Any = None,
+        segment_embedder: Any = None,
     ):
         from memorable_ai.core.embeddings import as_embedder
 
         self.storage = storage
         self.embedder = as_embedder(embedder)
+        # Turn tier: per-turn index vectors and surprise segmentation (both measured fine,
+        # or better, on a static model at ~30x lower cost). Defaults to the main embedder.
+        self.turn_embedder = as_embedder(turn_embedder) if turn_embedder is not None else self.embedder
+        # Segmentation compares cosine distances to fixed thresholds (min_surprise=0.45),
+        # so it must not depend on whichever model indexes turns. mdbr-leaf-ir's distances
+        # sit around 0.2 and produced no topic boundaries (docs/embedding_study.md §4).
+        self.segment_embedder = as_embedder(segment_embedder) if segment_embedder is not None else self.embedder
         self.llm_model = llm_model
         cfg = config or EpisodicConfigView()
         self.cfg = EpisodicConfigView(
@@ -245,11 +254,19 @@ class EpisodicMemory:
                 t["occurred_at"] = now
 
         vecs: Optional[np.ndarray] = None
-        if self.embedder is not None:
+        seg_vecs: Optional[np.ndarray] = None
+        if self.turn_embedder is not None:
             try:
-                vecs = self.embedder.encode([t["content"][:2000] for t in new])
+                vecs = self.turn_embedder.encode([t["content"][:2000] for t in new])
             except Exception as e:
                 logger.debug("Turn embedding failed: %s", e)
+        if self.segment_embedder is self.turn_embedder:
+            seg_vecs = vecs
+        elif self.segment_embedder is not None:
+            try:
+                seg_vecs = self.segment_embedder.encode([t["content"][:2000] for t in new])
+            except Exception as e:
+                logger.debug("Segmentation embedding failed: %s", e)
 
         result = IngestResult()
         session = self.storage.get_session()
@@ -291,7 +308,8 @@ class EpisodicMemory:
                     blended = vec + w * prev_vec
                     index_vec = blended / (np.linalg.norm(blended) or 1.0)
                 prev_vec = vec
-                reason = self._boundary(ep, t, vec) if ep is not None else None
+                seg_vec = seg_vecs[i] if seg_vecs is not None else None
+                reason = self._boundary(ep, t, seg_vec) if ep is not None else None
                 if ep is None or reason:
                     prev_ep = ep
                     if ep is not None:
@@ -336,7 +354,7 @@ class EpisodicMemory:
                 edges.append(self.storage._edge_dict("turn", row.id, "part_of", "episode", ep.id, **edge_attrs))
                 if self.cfg.index_turns:
                     self.storage.fts_insert(session, "turn", row.id, row.content)
-                self._update_stats(ep, t, vec)
+                self._update_stats(ep, t, seg_vec)
                 ep.end_seq = seq
                 ep.end_time = t["occurred_at"]
                 ep.turn_count = (ep.turn_count or 0) + 1
@@ -658,6 +676,9 @@ class EpisodicMemory:
             return {"title": None, "summary": None, "key_points": [], "entities": []}
 
         k = max(1, min(max_points, max(2, len(units) // 3)))
+        # Key-segment selection stays on the main (semantic) model: the selected sentences
+        # become the episode's searchable text, and choosing them with static vectors
+        # cost 2.4 pts of LoCoMo episode recall (ablation in docs/embedding_study.md).
         if self.embedder is not None and len(units) > 1:
             vecs = self.embedder.encode([u[1] for u in units])
             centroid = vecs.mean(axis=0)

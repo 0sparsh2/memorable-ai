@@ -6,6 +6,22 @@
 
 ---
 
+## Status after the 2026-11-15 study
+
+Details: [g0_deep_evaluation.md](g0_deep_evaluation.md) and [embedding_study.md](embedding_study.md).
+
+| # | Instrument | Outcome |
+|---|---|---|
+| 1 | Micro-batched embeddings | **Superseded** by tiering: turns use a static model (0.05 ms/text), so small-batch overhead now applies only to the few fact and episode vectors |
+| 2 | Device routing (MPS) | **Measured:** 1.75× on bulk, 3× slower per query, so only for re-index/backfill jobs and kept off the hot path |
+| 3 | Reuse turn vectors in summaries | **Rejected by ablation:** a static summarizer cost 2.4 pts of episode recall; the summarizer stays on the main model (via ONNX) |
+| 6 | Quantized ONNX | **Shipped:** fp32 ONNX is used automatically (identical vectors, 6× faster queries). int8 is opt-in because it is hardware- and length-dependent (slower on ARM for long texts) |
+| 14 | Numba | **Shipped as optional:** push PPR 25–50× faster than Python; org fallback 2.3 ms vs exact 64 ms |
+| 15 | Hypothesis | **Shipped (dev):** found a real defect (dead-node seeds); with the new concurrency test and a repro, four G0 defects found and fixed in total |
+| new | Tiered embeddings + profiles | **Shipped:** `quality` profile (leaf-ir turns) takes LoCoMo fused turn recall 0.565 → 0.642 with ingest 46 → 39 s; `fast` profile (static turns) gives 0.579 with ingest 25 s |
+| new | Vector-space tags + auto re-embed | **Shipped:** model changes can no longer mix vector spaces |
+| new | Fine-tuning (Kaggle) | **Planned** (embedding_study.md §6), awaiting go-ahead |
+
 ## TL;DR
 
 1. **The bottleneck is embedding inference, not SQL or the graph.**

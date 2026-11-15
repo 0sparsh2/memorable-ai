@@ -103,6 +103,7 @@ class MemoryEngine:
 
         self._storage: Optional[Storage] = None
         self._embedder = None
+        self._turn_embedder = None
         self._retrieval: Optional[HybridRetriever] = None
         self._extraction: Optional[MemoryExtractor] = None
         self._updater: Optional[MemoryUpdater] = None
@@ -183,6 +184,12 @@ class MemoryEngine:
             namespace=cfg.memory.namespace,
         )
         self._embedder = get_embedder(cfg.llm.embedding_model)
+        turn_model = getattr(cfg.llm, "turn_embedding_model", None)
+        self._turn_embedder = get_embedder(turn_model) if turn_model else self._embedder
+        seg_model = getattr(cfg.llm, "segment_embedding_model", None)
+        # Fallback is the main model (validated thresholds), never the turn model.
+        self._segment_embedder = get_embedder(seg_model) if seg_model else self._embedder
+        self._ensure_embedding_spaces(cfg)
         llm_model = cfg.llm.default_model
         ext_cfg = cfg.memory.extraction
         rcfg = cfg.memory.retrieval
@@ -210,6 +217,8 @@ class MemoryEngine:
                 llm_model=llm_model,
                 config=cfg.memory.episodic,
                 knowledge_graph=self._knowledge_graph,
+                turn_embedder=self._turn_embedder,
+                segment_embedder=self._segment_embedder,
             )
         self._pipeline = WritePipeline(
             storage=self._storage,
@@ -228,6 +237,7 @@ class MemoryEngine:
         self._retrieval = HybridRetriever(
             storage=self._storage,
             embedding_model=self._embedder,
+            turn_embedding_model=self._turn_embedder,
             knowledge_graph=self._knowledge_graph,
             semantic_weight=rcfg.semantic_weight,
             bm25_weight=rcfg.bm25_weight,
@@ -287,6 +297,30 @@ class MemoryEngine:
         """
         with active_scope(user_id=user_id, session_id=session_id, agent_id=agent_id):
             yield self
+
+    def _ensure_embedding_spaces(self, cfg: Any) -> None:
+        """
+        Never mix vector spaces in one index. Each layer records the space it was
+        embedded in; if the configured model changed, that layer is re-embedded from
+        its stored text. Databases from before this record are assumed to hold the
+        main model's vectors, which was true of every earlier version.
+        """
+        from memorable_ai.core.embeddings import space_of
+
+        main = getattr(self._embedder, "model_name", None) or cfg.llm.embedding_model
+        turn = getattr(self._turn_embedder, "model_name", None) or main
+        wanted = {"fact": space_of(main), "episode": space_of(main), "turn": space_of(turn)}
+        weight = getattr(cfg.memory.episodic, "turn_context_weight", 0.5)
+        for kind, space in wanted.items():
+            recorded = self._storage.embedding_space(kind)
+            if recorded is None and self._storage.has_embeddings(kind):
+                recorded = space_of(main)  # pre-tag databases: everything used the main model
+            if recorded is not None and recorded != space:
+                emb = self._turn_embedder if kind == "turn" else self._embedder
+                if emb is not None:
+                    n = self._storage.reembed(kind, emb.encode, turn_context_weight=weight)
+                    logger.info("Re-embedded %d %s vectors: %s -> %s", n, kind, recorded, space)
+            self._storage.set_embedding_space(kind, space)
 
     def register_identity(self, alias: str, canonical_user_id: str, confidence: float = 1.0) -> None:
         """Link a session/device alias to a canonical user id (persisted)."""

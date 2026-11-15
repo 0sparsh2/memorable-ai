@@ -13,10 +13,15 @@ scale. This engine takes about 1.4 / 16 / 71 ms for exact PPR on the whole
 partition (benchmarks/graph/ppr_engines.py).
 
 Mechanics:
-  * Sync: each partition tracks the highest edge id it has loaded and the newest
-    ``invalidated_at`` it has applied, so every query pulls only deltas.
-    Hard deletes bump ``memorable_meta.graph_epoch``, which forces a full rebuild.
-    This works across processes.
+  * Sync: every graph write transaction takes the next ``graph_seq`` under the
+    database write lock, so sequence order is commit order. Each partition
+    remembers the sequence it is synced to and pulls only rows with a larger
+    ``seq``, covering both inserts and invalidations; when nothing changed this is
+    one indexed read. Syncing by timestamp was rejected: a concurrent writer can
+    commit an older ``invalidated_at`` after a newer one, and a property test found
+    that a time-based engine missed it forever. Hard deletes bump
+    ``memorable_meta.graph_epoch``, which forces a full rebuild. All of this works
+    across processes.
   * Views: a query for user ``u`` with the shared tier walks one matrix space,
     with shared nodes first and then ``u``-only nodes. The shared matrix is reused
     as-is, and only ``u``'s small matrix is remapped. Other users' edges are never
@@ -35,7 +40,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime, timedelta
+from array import array
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
@@ -47,7 +52,6 @@ NodeKey = Tuple[str, int]
 # G0 parity with v0.2 retrieval: walk entity<->entity relations and fact<->entity links.
 DEFAULT_WEIGHTS: Dict[str, float] = {"relates": 1.0, "about": 1.0}
 
-_INVALIDATION_SKEW = timedelta(seconds=2)  # re-check a small window for out-of-order commits
 
 _KIND_CODES: Dict[str, int] = {}
 
@@ -59,62 +63,93 @@ def _kind_code(kind: str) -> int:
     return code
 
 
+def _node_code(key: NodeKey) -> int:
+    """Pack (kind, id) into one int: dict keys stay small ints, not tuples."""
+    return (_kind_code(key[0]) << 48) | int(key[1])
+
+
 def _weights_key(weights: Dict[str, float]) -> Tuple[Tuple[str, float], ...]:
     return tuple(sorted((k, float(v)) for k, v in weights.items() if v))
 
 
 class _Partition:
-    """Edges of one tier partition as growable arrays, plus cached CSR per weight profile."""
+    """
+    Edges of one tier partition in compact typed arrays, plus cached CSR per weight profile.
+
+    Storage is about 22 bytes per edge (int32 src/dst, uint8 kind code, float32 weight,
+    alive flag) plus the id->position map and the node index. The first version kept
+    Python lists of str/int objects, which cost 342 bytes per edge (measured).
+    """
 
     def __init__(self, namespace: Optional[str], user_id: Optional[str]):
         self.namespace = namespace
         self.user_id = user_id
-        self.index: Dict[NodeKey, int] = {}
-        self.keys: List[NodeKey] = []
-        self.node_kind: List[int] = []  # kind code per node (vectorised ranking)
-        self.node_id: List[int] = []
-        self.src: List[int] = []
-        self.dst: List[int] = []
-        self.kind: List[str] = []
-        self.weight: List[float] = []
-        self.pos: Dict[int, int] = {}
+        self.index: Dict[int, int] = {}  # packed node code -> local index
+        self.node_kind = array("B")  # kind code per node (vectorised ranking)
+        self.node_id = array("q")
+        self.src = array("i")
+        self.dst = array("i")
+        self.kind = array("B")
+        self.weight = array("f")
+        self.eids = array("q")
+        self._pos: Optional[Dict[int, int]] = None  # only if edge ids arrive out of order
         self.alive = bytearray()
         self.max_id = 0
-        self.since: Optional[datetime] = None
-        self.cursor: Any = None  # table-wide (max id, max invalidated_at) at last sync
+        self.seq = 0  # graph write sequence this partition is synced to
         self.loaded = False
         self.version = 0
         self._mats: Dict[Any, Any] = {}
 
+    @property
+    def n_nodes(self) -> int:
+        return len(self.node_id)
+
     def node(self, key: NodeKey) -> int:
-        idx = self.index.get(key)
+        code = _node_code(key)
+        idx = self.index.get(code)
         if idx is None:
-            idx = len(self.keys)
-            self.index[key] = idx
-            self.keys.append(key)
-            self.node_kind.append(_kind_code(key[0]))
-            self.node_id.append(key[1])
+            idx = len(self.node_id)
+            self.index[code] = idx
+            self.node_kind.append(code >> 48)
+            self.node_id.append(int(key[1]))
         return idx
 
+    def _position(self, eid: int) -> Optional[int]:
+        if self._pos is not None:
+            return self._pos.get(eid)
+        ids = np.frombuffer(self.eids, dtype=np.int64)
+        i = int(np.searchsorted(ids, eid))
+        return i if i < len(ids) and ids[i] == eid else None
+
     def add(self, rows: Sequence[Tuple[int, str, int, str, str, int, float]]) -> None:
+        node = self.node
+        added = False
         for eid, sk, si, kind, dk, di, w in rows:
-            if eid in self.pos:
-                continue
-            self.pos[eid] = len(self.src)
-            self.src.append(self.node((sk, int(si))))
-            self.dst.append(self.node((dk, int(di))))
-            self.kind.append(kind)
+            eid = int(eid)
+            if eid <= self.max_id and self._position(eid) is not None:
+                continue  # already loaded (deltas may repeat rows)
+            if eid < self.max_id and self._pos is None:
+                # Out-of-order id (e.g. Postgres sequences): switch to an explicit map.
+                self._pos = {int(e): i for i, e in enumerate(self.eids)}
+            if self._pos is not None:
+                self._pos[eid] = len(self.eids)
+            self.eids.append(eid)
+            self.src.append(node((sk, si)))
+            self.dst.append(node((dk, di)))
+            self.kind.append(_kind_code(kind))
             self.weight.append(1.0 if w is None else float(w))
             self.alive.append(1)
-            self.max_id = max(self.max_id, int(eid))
-        if rows:
+            if eid > self.max_id:
+                self.max_id = eid
+            added = True
+        if added:
             self.version += 1
             self._mats.clear()
 
     def kill(self, edge_ids: Iterable[int]) -> None:
         changed = False
         for eid in edge_ids:
-            p = self.pos.get(int(eid))
+            p = self._position(int(eid))
             if p is not None and self.alive[p]:
                 self.alive[p] = 0
                 changed = True
@@ -127,12 +162,19 @@ class _Partition:
         if not self.src:
             e = np.zeros(0, dtype=np.int64)
             return e, e, np.zeros(0, dtype=np.float32)
-        kw = np.array([weights.get(k, 0.0) for k in self.kind], dtype=np.float32)
-        w = kw * np.asarray(self.weight, dtype=np.float32) * np.frombuffer(bytes(self.alive), dtype=np.uint8)
+        table = np.zeros(max(_KIND_CODES.values(), default=0) + 1, dtype=np.float32)
+        for k, v in weights.items():
+            if k in _KIND_CODES:
+                table[_KIND_CODES[k]] = v
+        w = (
+            table[np.frombuffer(self.kind, dtype=np.uint8)]
+            * np.frombuffer(self.weight, dtype=np.float32)
+            * np.frombuffer(self.alive, dtype=np.uint8)
+        )
         keep = w > 0
         return (
-            np.asarray(self.src, dtype=np.int64)[keep],
-            np.asarray(self.dst, dtype=np.int64)[keep],
+            np.frombuffer(self.src, dtype=np.int32)[keep].astype(np.int64),
+            np.frombuffer(self.dst, dtype=np.int32)[keep].astype(np.int64),
             w[keep],
         )
 
@@ -141,7 +183,7 @@ class _Partition:
         key = ("self", _weights_key(weights))
         m = self._mats.get(key)
         if m is None:
-            m = _sym_csr(*self.coo(weights), n=len(self.keys))
+            m = _sym_csr(*self.coo(weights), n=self.n_nodes)
             self._mats[key] = m
         return m
 
@@ -161,62 +203,65 @@ class _View:
     def __init__(self, shared: Optional[_Partition], user: Optional[_Partition], weights: Dict[str, float]):
         self.shared, self.user = shared, user
         self.stamp = (shared.version if shared else -1, user.version if user else -1, _weights_key(weights))
-        self.n_s = len(shared.keys) if shared else 0
-        self.extra_keys: List[NodeKey] = []
-        self.extra_index: Dict[NodeKey, int] = {}
+        self.n_s = shared.n_nodes if shared else 0
+        self.extra_index: Dict[int, int] = {}  # packed code -> offset after the shared block
         self.mats = []
-        if shared is not None:
-            self.mats.append(shared.matrix(weights))
-        if user is not None:
-            if shared is None:
-                self.mats.append(user.matrix(weights))
-                self.extra_keys, self.extra_index = user.keys, user.index
-            else:
-                remap = np.empty(len(user.keys), dtype=np.int64)
-                for j, key in enumerate(user.keys):
-                    s_idx = shared.index.get(key)
-                    if s_idx is not None and s_idx < self.n_s:
-                        remap[j] = s_idx
-                    else:
-                        self.extra_index[key] = len(self.extra_keys)
-                        self.extra_keys.append(key)
-                        remap[j] = self.n_s + self.extra_index[key]
-                src, dst, w = user.coo(weights)
-                self.mats.append(_sym_csr(remap[src], remap[dst], w, self.n_s + len(self.extra_keys)))
-        # Snapshot the size: partitions keep growing, but this view's matrices don't.
-        self.n = self.n_s + len(self.extra_keys)
         kinds: List[np.ndarray] = []
         ids: List[np.ndarray] = []
         if shared is not None:
-            kinds.append(np.asarray(shared.node_kind[: self.n_s], dtype=np.int16))
-            ids.append(np.asarray(shared.node_id[: self.n_s], dtype=np.int64))
+            self.mats.append(shared.matrix(weights))
+            kinds.append(np.frombuffer(shared.node_kind, dtype=np.uint8)[: self.n_s].astype(np.int16))
+            ids.append(np.frombuffer(shared.node_id, dtype=np.int64)[: self.n_s].copy())
+        n_extra = 0
         if user is not None:
-            extra = self.extra_keys[: self.n - self.n_s]
+            n_u = user.n_nodes
+            u_kind = np.frombuffer(user.node_kind, dtype=np.uint8)[:n_u]
+            u_id = np.frombuffer(user.node_id, dtype=np.int64)[:n_u]
             if shared is None:
-                kinds.append(np.asarray(user.node_kind[: self.n], dtype=np.int16))
-                ids.append(np.asarray(user.node_id[: self.n], dtype=np.int64))
+                self.mats.append(user.matrix(weights))
+                self.extra_index = user.index
+                n_extra = n_u
+                kinds.append(u_kind.astype(np.int16))
+                ids.append(u_id.copy())
             else:
-                kinds.append(np.asarray([_kind_code(k[0]) for k in extra], dtype=np.int16))
-                ids.append(np.asarray([k[1] for k in extra], dtype=np.int64))
+                remap = np.empty(n_u, dtype=np.int64)
+                extra_rows = []
+                for j in range(n_u):
+                    code = (int(u_kind[j]) << 48) | int(u_id[j])
+                    s_idx = shared.index.get(code)
+                    if s_idx is not None and s_idx < self.n_s:
+                        remap[j] = s_idx
+                    else:
+                        self.extra_index[code] = n_extra
+                        remap[j] = self.n_s + n_extra
+                        extra_rows.append(j)
+                        n_extra += 1
+                src, dst, w = user.coo(weights)
+                self.mats.append(_sym_csr(remap[src], remap[dst], w, self.n_s + n_extra))
+                rows = np.asarray(extra_rows, dtype=np.int64)
+                kinds.append(u_kind[rows].astype(np.int16))
+                ids.append(u_id[rows].copy())
+        # Snapshot the size: partitions keep growing, but this view's matrices don't.
+        self.n = self.n_s + n_extra
         self.node_kind = np.concatenate(kinds) if kinds else np.zeros(0, dtype=np.int16)
         self.node_id = np.concatenate(ids) if ids else np.zeros(0, dtype=np.int64)
         self._deg_cache: Dict[Any, np.ndarray] = {}
 
     def idx(self, key: NodeKey) -> Optional[int]:
+        code = _node_code(key)
         if self.shared is not None:
-            i = self.shared.index.get(key)
+            i = self.shared.index.get(code)
             if i is not None and i < self.n_s:
                 return i
-        j = self.extra_index.get(key)
+        j = self.extra_index.get(code)
         if j is None:
             return None
         i = self.n_s + j
         return i if i < self.n else None
 
     def key(self, i: int) -> NodeKey:
-        if self.shared is not None and i < self.n_s:
-            return self.shared.keys[i]
-        return self.extra_keys[i - self.n_s]
+        kind = next(k for k, c in _KIND_CODES.items() if c == int(self.node_kind[i]))
+        return (kind, int(self.node_id[i]))
 
     def matvec(self, v: np.ndarray) -> np.ndarray:
         out = np.zeros(self.n, dtype=np.float32)
@@ -228,6 +273,38 @@ class _View:
 
     def nnz(self) -> int:
         return int(sum(m.nnz for m in self.mats))
+
+    def combined(self):
+        """All matrices summed into one n x n CSR (cached; used by the push kernel)."""
+        if getattr(self, "_combined", None) is None:
+            import scipy.sparse as sp
+
+            total = None
+            for m in self.mats:
+                k = m.shape[0]
+                if k < self.n:
+                    indptr = np.concatenate([m.indptr, np.full(self.n - k, m.indptr[-1], dtype=m.indptr.dtype)])
+                    m = sp.csr_matrix((m.data, m.indices, indptr), shape=(self.n, self.n))
+                total = m if total is None else total + m
+            self._combined = total if total is not None else sp.csr_matrix((self.n, self.n), dtype=np.float32)
+        return self._combined
+
+    def present(self) -> np.ndarray:
+        """
+        Nodes with at least one live edge in this view. A node whose edges were all
+        invalidated stays in the partition's index until the next rebuild, but it must
+        behave exactly as if it were absent (found by the stateful property test).
+        """
+        if getattr(self, "_present", None) is None:
+            self._present = self.matvec(np.ones(self.n, dtype=np.float32)) > 0
+        return self._present
+
+    def push_arrays(self):
+        if getattr(self, "_push_arrays", None) is None:
+            from memorable_ai.graph._push import prepare
+
+            self._push_arrays = prepare(self.combined())
+        return self._push_arrays
 
 
 class PPRResult:
@@ -297,45 +374,44 @@ class GraphEngine:
 
     # ------------------------------------------------------------------ sync
 
-    def _check_state(self) -> Any:
-        """One round trip: rebuild on epoch change; return the table-wide change cursor."""
-        epoch, max_id, max_inv = self.storage.graph_state()
+    def _check_state(self) -> int:
+        """One round trip: rebuild on epoch change; return the current graph write sequence."""
+        epoch, seq = self.storage.graph_state()
         if epoch != self._epoch:
             self._parts.clear()
             self._views.clear()
             self._epoch = epoch
-        return (max_id, max_inv)
+        return seq
 
-    def _partition(self, namespace: Optional[str], user_id: Optional[str], cursor: Any = None) -> _Partition:
+    def _partition(self, namespace: Optional[str], user_id: Optional[str], seq: int = 0) -> _Partition:
         key = (namespace, user_id)
         part = self._parts.get(key)
         if part is None:
             part = _Partition(namespace, user_id)
             self._parts[key] = part
-        if part.loaded and cursor is not None and part.cursor == cursor:
-            return part  # nothing was added or invalidated anywhere since the last sync
-        part.cursor = cursor
-        rows = self.storage.edges_after(namespace, user_id, part.max_id)
-        if rows:
-            part.add(rows)
         if not part.loaded:
-            # Everything loaded so far was valid; only later invalidations matter.
-            part.since = self.storage.max_edge_invalidated_at(namespace, user_id)
-            part.loaded = True
-        elif part.max_id:
-            since = part.since - _INVALIDATION_SKEW if part.since else None
-            inv = self.storage.edge_invalidations_since(namespace, user_id, since, part.max_id)
-            if inv:
-                part.kill(i for i, _ in inv)
-                newest = max(t for _, t in inv)
-                part.since = max(part.since, newest) if part.since else newest
+            # ``seq`` was read before this load. Writes committed in between are
+            # loaded now and seen again by the next delta; ``add`` is idempotent.
+            part.add(self.storage.partition_edges(namespace, user_id))
+            part.seq, part.loaded = seq, True
+            return part
+        if seq <= part.seq:
+            return part  # no graph write committed anywhere since the last sync
+        changes = self.storage.partition_changes(namespace, user_id, part.seq)
+        added = [r[:7] for r in changes if not r[7]]
+        dead = [r[0] for r in changes if r[7]]
+        if added:
+            part.add(added)
+        if dead:
+            part.kill(dead)
+        part.seq = seq
         return part
 
     def _view(self, namespace: Optional[str], user_id: Optional[str], include_shared: bool,
-              weights: Dict[str, float], cursor: Any = None) -> _View:
-        shared = self._partition(namespace, None, cursor) if (include_shared or user_id is None) else None
-        user = self._partition(namespace, user_id, cursor) if user_id is not None else None
-        if shared is not None and not shared.keys and user is not None:
+              weights: Dict[str, float], seq: int = 0) -> _View:
+        shared = self._partition(namespace, None, seq) if (include_shared or user_id is None) else None
+        user = self._partition(namespace, user_id, seq) if user_id is not None else None
+        if shared is not None and not shared.n_nodes and user is not None:
             shared = None  # empty org tier: walk the user's partition alone
         vkey = (namespace, user_id, shared is not None, _weights_key(weights))
         stamp = (shared.version if shared else -1, user.version if user else -1, _weights_key(weights))
@@ -375,16 +451,17 @@ class GraphEngine:
         """
         weights = dict(weights or self.weights)
         with self._lock:
-            cursor = self._check_state()
-            view = self._view(namespace, user_id, include_shared, weights, cursor)
+            seq = self._check_state()
+            view = self._view(namespace, user_id, include_shared, weights, seq)
             n = view.n
             if n == 0:
                 return PPRResult(None)
             excluded = sorted({i for i in (view.idx(k) for k in exclude) if i is not None})
+            present = view.present()
             s = np.zeros(n, dtype=np.float32)
             for key, w in seeds.items():
                 i = view.idx(key)
-                if i is not None and w > 0:
+                if i is not None and w > 0 and present[i]:
                     s[i] += float(w)
             if excluded:
                 s[excluded] = 0.0
@@ -401,10 +478,16 @@ class GraphEngine:
                 deg = view.matvec(mask) * mask
                 view._deg_cache.clear()
                 view._deg_cache[mask_key] = deg
-            use_push = method == "push" or (method == "auto" and view.nnz() > self.exact_max_entries)
+            use_push = method in ("push", "push-python") or (method == "auto" and view.nnz() > self.exact_max_entries)
+            if use_push and method != "push-python":
+                from memorable_ai.graph._push import push_ppr
+
+                scores = push_ppr(view.push_arrays(), deg, mask, s, 1.0 - self.damping, self.push_eps)
+                return PPRResult(view, scores.astype(np.float32) * present)
             if use_push:
-                return PPRResult(view, sparse=self._push(view, s, mask, deg))
-            return PPRResult(view, self._exact(view, s, mask, deg))
+                sparse = self._push(view, s, mask, deg)
+                return PPRResult(view, sparse={i: v for i, v in sparse.items() if present[i]})
+            return PPRResult(view, self._exact(view, s, mask, deg) * present)
 
     def _exact(self, view: _View, s: np.ndarray, mask: np.ndarray, deg: np.ndarray) -> np.ndarray:
         d = np.float32(self.damping)
@@ -460,6 +543,6 @@ class GraphEngine:
             return {
                 "partitions": len(self._parts),
                 "views": len(self._views),
-                "nodes": sum(len(p.keys) for p in self._parts.values()),
+                "nodes": sum(p.n_nodes for p in self._parts.values()),
                 "edges": sum(len(p.src) for p in self._parts.values()),
             }

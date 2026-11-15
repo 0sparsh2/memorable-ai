@@ -107,7 +107,8 @@ async def evaluate(convs: int, k: int, embedder: str, db_dir: Path, turn_context
             gold = set(qa.evidence)
             q0 = time.time()
             qvec = r._encode(qa.question)
-            dense = [i for i, _ in eng._storage.vector_search("turn", qvec, k=50, user_id=conv_id)]
+            tvec = r._encode(qa.question, kind="turn")  # the turn tier may use its own embedder
+            dense = [i for i, _ in eng._storage.vector_search("turn", tvec, k=50, user_id=conv_id)]
             lexical = [i for i, _ in eng._storage.lexical_search("turn", qa.question, k=50, user_id=conv_id)]
             fused = [
                 i

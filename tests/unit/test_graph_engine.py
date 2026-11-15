@@ -265,3 +265,66 @@ async def test_forget_user_removes_their_edges(engine_factory):
         assert session.query(Edge).filter_by(user_id="carol").count() == 0
     finally:
         session.close()
+
+
+def test_out_of_order_invalidation_is_not_missed(storage):
+    """Regression (found by property testing): sync must follow commit order, not timestamps."""
+    writer = Storage(storage.connection_string)  # a second process on the same database
+    ids = _edges(storage, [(("entity", 1), ("fact", i)) for i in (1, 2, 3)], kind="about")
+    eng = GraphEngine(storage)
+    facts = lambda e: sorted(i for i, _ in e.ppr(None, "u", {("entity", 1): 1.0}).top("fact"))
+    assert facts(eng) == [1, 2, 3]
+    writer.invalidate_edges(ids=[ids[0]])
+    assert facts(eng) == [2, 3]
+    writer.invalidate_edges(ids=[ids[1]], at=datetime(2020, 1, 1))  # stamped before the previous commit
+    assert facts(eng) == [3] == facts(GraphEngine(storage))
+
+
+def test_nodes_whose_edges_all_died_behave_as_absent(storage):
+    """Regression (found by property testing): a dead seed must not keep teleport mass."""
+    ids = _edges(storage, [(("entity", 1), ("fact", 7))], kind="about")
+    eng = GraphEngine(storage)
+    assert eng.ppr(None, "u", {("fact", 7): 1.0}).score(("fact", 7)) > 0
+    storage.invalidate_edges(ids=ids)
+    live = eng.ppr(None, "u", {("fact", 7): 1.0})
+    assert live.score(("fact", 7)) == 0.0 and live.top("fact") == []
+
+
+def test_concurrent_writers_and_readers_stay_consistent(storage):
+    """Threads writing edges/invalidations while others query: no errors, and the
+    long-lived engine converges to exactly what a fresh engine sees."""
+    import threading
+
+    eng = GraphEngine(storage, tol=1e-10)
+    errors = []
+    seed = {("entity", 1): 1.0}
+
+    def writer(k):
+        try:
+            w = Storage(storage.connection_string)
+            for i in range(25):
+                ids = w.add_edges([{"src_kind": "entity", "src_id": 1 + (i % 3), "kind": "about",
+                                    "dst_kind": "fact", "dst_id": 1000 * k + i, "user_id": "u"}])
+                if i % 4 == 0:
+                    w.invalidate_edges(ids=ids)
+        except Exception as e:  # pragma: no cover - surfaced below
+            errors.append(e)
+
+    def reader():
+        try:
+            for _ in range(40):
+                eng.ppr(None, "u", seed).top("fact", 10)
+        except Exception as e:  # pragma: no cover
+            errors.append(e)
+
+    threads = [threading.Thread(target=writer, args=(k,)) for k in (1, 2, 3)] + [
+        threading.Thread(target=reader) for _ in range(3)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors
+    live = eng.ppr(None, "u", seed)
+    fresh = GraphEngine(storage, tol=1e-10).ppr(None, "u", seed)
+    assert {i for i, _ in live.top("fact", 1000)} == {i for i, _ in fresh.top("fact", 1000)}

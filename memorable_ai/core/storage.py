@@ -21,6 +21,7 @@ import threading
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+import numpy as np
 from sqlalchemy import create_engine, event, inspect, or_, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -29,6 +30,7 @@ from memorable_ai.core.errors import StorageError
 from memorable_ai.core.models import (  # noqa: F401  (re-exported for compatibility)
     Base,
     Conversation,
+    Counter,
     Edge,
     Entity,
     Episode,
@@ -206,6 +208,14 @@ class Storage:
                         except Exception as e:
                             conn.rollback()
                             logger.debug("Migration skip conversations.%s: %s", col, e)
+            if "edges" in tables and "seq" not in {c["name"] for c in insp.get_columns("edges")}:
+                try:
+                    conn.execute(text("ALTER TABLE edges ADD COLUMN seq INTEGER"))
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_edges_sync ON edges (namespace, user_id, seq)"))
+                    conn.commit()
+                except Exception as e:
+                    conn.rollback()
+                    logger.debug("Migration skip edges.seq: %s", e)
             for table in ("turns", "episodes", "sessions", "entities"):
                 if table not in tables:
                     continue
@@ -228,6 +238,7 @@ class Storage:
                     conn.rollback()
                     logger.debug("Index skip: %s", e)
         self._backfill(added_user_col)
+        self._ensure_counters()
         self._backfill_edges(tables)
         self._ensure_fts()
 
@@ -247,6 +258,33 @@ class Storage:
             logger.debug("Backfill skipped: %s", e)
         finally:
             session.close()
+
+    def _ensure_counters(self) -> None:
+        """Create the counter rows up front so writers only ever UPDATE them."""
+        for key in ("graph_seq", "graph_epoch"):
+            session = self.get_session()
+            try:
+                if session.get(Counter, key) is None:
+                    session.add(Counter(key=key, value=0))
+                    session.commit()
+            except Exception:  # another process created it first
+                session.rollback()
+            finally:
+                session.close()
+
+    def _bump(self, session: Session, key: str) -> int:
+        """Atomically increment a counter inside the caller's transaction; return the new value."""
+        n = (
+            session.query(Counter)
+            .filter(Counter.key == key)
+            .update({Counter.value: Counter.value + 1}, synchronize_session=False)
+        )
+        if not n:  # counters table created by a newer process after our init
+            session.add(Counter(key=key, value=1))
+            session.flush()
+            return 1
+        # This transaction now holds the write lock on the row, so the read is our own value.
+        return int(session.query(Counter.value).filter(Counter.key == key).scalar())
 
     def _backfill_edges(self, tables: set) -> None:
         """
@@ -970,8 +1008,10 @@ class Storage:
         session = session or self.get_session()
         try:
             now = utcnow()
+            seq = self.next_graph_seq(session)
             rows = [
                 Edge(
+                    seq=seq,
                     namespace=self.namespace or e.get("namespace"),
                     user_id=e.get("user_id"),
                     agent_id=e.get("agent_id"),
@@ -1044,7 +1084,10 @@ class Storage:
                 q = q.filter(Edge.kind.in_(list(kinds)))
             now = at or utcnow()
             out = []
-            for e in q.all():
+            rows = q.all()
+            seq = self.next_graph_seq(session) if rows else None
+            for e in rows:
+                e.seq = seq
                 e.invalidated_at = now
                 e.valid_to = e.valid_to or now
                 if superseded_by:
@@ -1108,84 +1151,142 @@ class Storage:
                 session.close()
 
     def graph_epoch(self) -> int:
-        session = self.get_session()
-        try:
-            row = session.get(MemorableMeta, "graph_epoch")
-            return int(row.value) if row is not None and row.value else 0
-        finally:
-            session.close()
+        return self.graph_state()[0]
 
     def bump_graph_epoch(self, session: Session) -> None:
-        row = session.get(MemorableMeta, "graph_epoch")
-        if row is None:
-            session.add(MemorableMeta(key="graph_epoch", value="1"))
-        else:
-            row.value = str(int(row.value or 0) + 1)
+        self._bump(session, "graph_epoch")
 
-    def graph_state(self) -> Tuple[int, int, Optional[datetime]]:
+    def next_graph_seq(self, session: Session) -> int:
         """
-        ``(graph_epoch, max edge id, newest invalidated_at)`` for the whole table.
-        All three are index lookups, so graph engines can skip delta queries when
-        nothing changed.
-        """
-        from sqlalchemy import func
+        Allocate the next graph write sequence inside the caller's transaction.
 
+        The increment is an atomic SQL UPDATE in the same transaction as the edges.
+        It takes the write lock, so sequence order is commit order and no two
+        transactions share a value. Timestamps don't have that property: a
+        concurrent writer can commit an older ``invalidated_at`` after a newer one,
+        which an engine syncing by time would miss forever.
+        """
+        return self._bump(session, "graph_seq")
+
+    def graph_state(self) -> Tuple[int, int]:
+        """``(graph_epoch, graph_seq)``: one indexed read tells engines whether to sync."""
         session = self.get_session()
         try:
-            row = session.get(MemorableMeta, "graph_epoch")
-            epoch = int(row.value) if row is not None and row.value else 0
-            max_id = session.query(func.max(Edge.id)).scalar() or 0
-            max_inv = session.query(func.max(Edge.invalidated_at)).scalar()
-            return epoch, int(max_id), max_inv
+            vals = dict(session.query(Counter.key, Counter.value)
+                        .filter(Counter.key.in_(("graph_epoch", "graph_seq"))).all())
+            return int(vals.get("graph_epoch") or 0), int(vals.get("graph_seq") or 0)
         finally:
             session.close()
 
-    def edges_after(
-        self, namespace: Optional[str], user_id: Optional[str], after_id: int
+    @staticmethod
+    def _partition_filter(q, namespace: Optional[str], user_id: Optional[str]):
+        q = q.filter(Edge.namespace == namespace) if namespace else q.filter(Edge.namespace.is_(None))
+        return q.filter(Edge.user_id == user_id) if user_id is not None else q.filter(Edge.user_id.is_(None))
+
+    def partition_edges(
+        self, namespace: Optional[str], user_id: Optional[str]
     ) -> List[Tuple[int, str, int, str, str, int, float]]:
-        """Valid edges of one tier partition with id > ``after_id`` (graph-engine sync)."""
+        """All valid edges of one tier partition (graph-engine initial load)."""
         session = self.get_session()
         try:
             q = session.query(Edge.id, Edge.src_kind, Edge.src_id, Edge.kind, Edge.dst_kind, Edge.dst_id,
-                              Edge.weight).filter(Edge.id > after_id, Edge.invalidated_at.is_(None))
-            if namespace:
-                q = q.filter(Edge.namespace == namespace)
-            q = q.filter(Edge.user_id == user_id) if user_id is not None else q.filter(Edge.user_id.is_(None))
-            return [tuple(r) for r in q.order_by(Edge.id).all()]
+                              Edge.weight).filter(Edge.invalidated_at.is_(None))
+            return [tuple(r) for r in self._partition_filter(q, namespace, user_id).order_by(Edge.id).all()]
         finally:
             session.close()
 
-    def max_edge_invalidated_at(self, namespace: Optional[str], user_id: Optional[str]) -> Optional[datetime]:
-        """Newest ``invalidated_at`` in a partition (sync starting point)."""
-        from sqlalchemy import func
-
+    def partition_changes(
+        self, namespace: Optional[str], user_id: Optional[str], after_seq: int
+    ) -> List[Tuple[int, str, int, str, str, int, float, bool]]:
+        """Edges of a partition inserted or invalidated after ``after_seq`` (+ invalid flag)."""
         session = self.get_session()
         try:
-            q = session.query(func.max(Edge.invalidated_at))
-            if namespace:
-                q = q.filter(Edge.namespace == namespace)
-            q = q.filter(Edge.user_id == user_id) if user_id is not None else q.filter(Edge.user_id.is_(None))
-            return q.scalar()
+            q = session.query(Edge.id, Edge.src_kind, Edge.src_id, Edge.kind, Edge.dst_kind, Edge.dst_id,
+                              Edge.weight, Edge.invalidated_at).filter(Edge.seq > after_seq)
+            rows = self._partition_filter(q, namespace, user_id).order_by(Edge.seq, Edge.id).all()
+            return [(*r[:7], r[7] is not None) for r in rows]
         finally:
             session.close()
 
-    def edge_invalidations_since(
-        self, namespace: Optional[str], user_id: Optional[str], since: Optional[datetime], max_id: int
-    ) -> List[Tuple[int, datetime]]:
-        """Edges (id <= max_id) of a partition invalidated at or after ``since``."""
+    # ------------------------------------------------------------------ embedding spaces
+
+    def _space_key(self, kind: str) -> str:
+        return f"embedding_space:{self.namespace or ''}:{kind}"
+
+    def embedding_space(self, kind: str) -> Optional[str]:
         session = self.get_session()
         try:
-            q = session.query(Edge.id, Edge.invalidated_at).filter(
-                Edge.invalidated_at.isnot(None), Edge.id <= max_id
-            )
-            if since is not None:
-                q = q.filter(Edge.invalidated_at >= since)
-            if namespace:
-                q = q.filter(Edge.namespace == namespace)
-            q = q.filter(Edge.user_id == user_id) if user_id is not None else q.filter(Edge.user_id.is_(None))
-            return [tuple(r) for r in q.all()]
+            row = session.get(MemorableMeta, self._space_key(kind))
+            return row.value if row is not None else None
         finally:
             session.close()
+
+    def set_embedding_space(self, kind: str, space: str) -> None:
+        session = self.get_session()
+        try:
+            row = session.get(MemorableMeta, self._space_key(kind))
+            if row is None:
+                session.add(MemorableMeta(key=self._space_key(kind), value=space[:255]))
+            else:
+                row.value = space[:255]
+            session.commit()
+        except Exception:
+            session.rollback()
+        finally:
+            session.close()
+
+    def has_embeddings(self, kind: str) -> bool:
+        model = KIND_MODELS[kind]
+        session = self.get_session()
+        try:
+            q = self._ns_filter(session.query(model.id).filter(model.embedding.isnot(None)), model)
+            return q.first() is not None
+        finally:
+            session.close()
+
+    def reembed(self, kind: str, encode, turn_context_weight: float = 0.5, batch_size: int = 256) -> int:
+        """
+        Recompute every stored vector of ``kind`` with ``encode(list[str]) -> ndarray``
+        after an embedding-model change, so old and new vectors never mix in one index.
+        Turns reproduce the ingest-time contextual blend (previous turn, same session).
+        """
+        model = KIND_MODELS[kind]
+        session = self.get_session()
+        n = 0
+        try:
+            q = self._ns_filter(session.query(model), model)
+            if kind == "turn":
+                rows = q.order_by(Turn.namespace, Turn.session_id, Turn.seq).all()
+                texts = [(t.content or "")[:2000] for t in rows]
+            elif kind == "episode":
+                rows = q.filter(Episode.status == "closed").all()
+                texts = [f"{e.title or ''}\n{e.summary or ''}\n" + "\n".join(e.key_points or []) for e in rows]
+            else:
+                rows = q.filter(Memory.embedding.isnot(None)).all()
+                texts = [m.content for m in rows]
+            prev = None
+            prev_session = None
+            for start in range(0, len(rows), batch_size):
+                vecs = np.asarray(encode(texts[start : start + batch_size]), dtype=np.float32)
+                for row, vec in zip(rows[start : start + batch_size], vecs):
+                    out = vec
+                    if kind == "turn":
+                        sess = (row.namespace, row.session_id)
+                        if turn_context_weight > 0 and prev is not None and prev_session == sess:
+                            b = vec + turn_context_weight * prev
+                            out = b / (np.linalg.norm(b) or 1.0)
+                        prev, prev_session = vec, sess
+                    row.embedding = out.tolist()
+                    n += 1
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+        with self._sync_lock:
+            self._reset_indexes(kind)
+        return n
 
     # ------------------------------------------------------------------ memories (read)
 

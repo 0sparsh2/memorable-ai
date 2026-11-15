@@ -46,8 +46,9 @@ jobs:
         # LOCOMO harness smoke (no API keys, no dataset download required for unit tests)
         pytest tests/unit/test_locomo_loader.py tests/unit/test_locomo_smoke.py -q --no-cov
         
-        # Run tests with coverage, but don't fail on coverage requirement for now
-        pytest tests/ -v --cov=memorable_ai --cov-report=xml --cov-report=term-missing --cov-fail-under=0 || true
+        # Run tests with coverage. Test failures fail the build; the coverage threshold
+        # is not enforced yet (CLI/Neo4j/integrations are still below 80%).
+        pytest tests/ -v --cov=memorable_ai --cov-report=xml --cov-report=term-missing --cov-fail-under=0
         
         # Check if any tests actually ran
         if [ -f coverage.xml ]; then

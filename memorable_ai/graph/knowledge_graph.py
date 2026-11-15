@@ -240,6 +240,7 @@ class KnowledgeGraph:
         session = self.storage.get_session()
         try:
             now = utcnow()
+            seq = self.storage.next_graph_seq(session)
             valid_from = memory.get("valid_from") if isinstance(memory.get("valid_from"), datetime) else now
             about: Dict[int, str] = {}  # entity id -> role
             by_norm: Dict[str, Entity] = {}
@@ -286,12 +287,13 @@ class KnowledgeGraph:
                 rel = self._edge(
                     scope, ("entity", s_ent.id), "relates", ("entity", o_ent.id),
                     predicate=pred, valid_from=valid_from, created_at=now,
-                    evidence_kind="fact", evidence_id=int(mid),
+                    evidence_kind="fact", evidence_id=int(mid), seq=seq,
                 )
                 session.add(rel)
                 session.flush()
                 if pred in self.functional:
                     for old in existing:
+                        old.seq = seq
                         old.invalidated_at = now
                         old.valid_to = valid_from
                         old.superseded_by_id = rel.id
@@ -299,7 +301,7 @@ class KnowledgeGraph:
                             superseded_facts.append(int(old.evidence_id))
             for eid, role in about.items():
                 new_edges.append(self._edge(scope, ("fact", int(mid)), "about", ("entity", eid),
-                                            role=role, valid_from=valid_from, created_at=now))
+                                            role=role, valid_from=valid_from, created_at=now, seq=seq))
             session.add_all(new_edges)
             session.commit()
         except Exception as e:
@@ -316,13 +318,14 @@ class KnowledgeGraph:
             return
         session = self.storage.get_session()
         try:
+            seq = self.storage.next_graph_seq(session)
             seen: Set[int] = set()
             for name in names:
                 ent = self._get_or_create_entity(session, scope, name)
                 if ent is None or ent.is_self or ent.id in seen:
                     continue
                 seen.add(ent.id)
-                session.add(self._edge(scope, ("episode", int(episode_id)), "mentions", ("entity", ent.id)))
+                session.add(self._edge(scope, ("episode", int(episode_id)), "mentions", ("entity", ent.id), seq=seq))
                 ent.mention_count = (ent.mention_count or 0) + 1
             session.commit()
         except Exception as e:

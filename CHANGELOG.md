@@ -22,6 +22,26 @@ Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instru
 - `agent_id` on `Scope`, `engine.scope(agent_id=...)`, provider `metadata.agent_id`, and on memories, turns, episodes, sessions, entities and edges.
 - `Storage.unsupported_dependents()` (cascade primitive), `add_edges`, `invalidate_edges`, `delete_node_edges`, `graph_state`.
 - Query-embedding LRU cache.
+- Embeddings (see `docs/embedding_study.md`):
+  - ONNX Runtime backend, used automatically for models that publish an ONNX export: identical vectors, about 6× faster queries. It supports prompts, CLS/mean pooling, Dense layers and sidecar weights.
+  - `onnx-int8:`, `onnx-o3:`, `static:` (model2vec) and `torch:` backend prefixes.
+  - Embedding roles: semantic (main model), turn index (`turn_embedding_model`) and segmentation (`segment_embedding_model`).
+  - Profiles via `MEMORABLE_EMBEDDING_PROFILE`:
+    - `quality` (default with the `fast` extra): leaf-ir turns. LoCoMo fused turn recall 0.565 → 0.642, multi-hop 0.504 → 0.571, ingest 46 → 39 s.
+    - `fast`: potion-32M turns. Fused 0.579, ingest 25 s, query 3.2 ms.
+    - `legacy`: one model for everything (v0.2 behaviour).
+  - Per-layer vector-space tags with automatic re-embedding when the model changes.
+- `memorable-ai[fast]` extra (onnxruntime, model2vec, numba). Hypothesis property tests (dev extra), a concurrency test, and LongMemEval / model / backend benchmarks.
+- Optional numba kernel for local-push PPR.
+
+### Fixed (found by the G0 deep evaluation, `docs/g0_deep_evaluation.md`)
+- The graph engine synced invalidations by timestamp and could permanently miss one committed out of order. Sync now follows a commit-ordered write sequence.
+- Nodes whose edges were all invalidated kept teleport mass as seeds.
+- Graph counters used a Python read-modify-write, which could give duplicate values under concurrent writers. They now use an atomic SQL increment.
+- `as_embedder()` wrappers crashed in `encode_query`.
+- CI ignored test failures (`|| true`).
+- Property tests leaked temporary databases.
+- Graph engine memory went from 342 to 101 bytes per edge.
 
 ### Changed
 - `relations` and `mentions` are replaced by `edges`. Existing databases are backfilled once; the legacy tables are left untouched.
