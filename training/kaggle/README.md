@@ -8,7 +8,7 @@ GPU jobs for [docs/retrieval_round2.md](../../docs/retrieval_round2.md). Each ru
 | `lme_contexts/` | Builds the end-to-end QA eval's LongMemEval-S contexts. It clones the public branch, ingests all 500 haystacks through the real pipeline, and records every arm's memory context. Embeddings run on the GPUs, one worker per T4. No model is called. | ~1 h |
 | `embed_ft/` | Teacher filter and hard-negative mining (Qwen3-Embedding-0.6B), then contrastive fine-tunes of leaf-ir, MiniLM and potion-32M, plus BCE fine-tunes of three rerankers. Output: `models/`, `ft_report.json`. | about 1 h |
 
-No LoCoMo or LongMemEval data is used. ShareGPT and UltraChat are excluded because LongMemEval builds its filler sessions from them.
+The training jobs (`qgen`, `embed_ft`) use no LoCoMo or LongMemEval data. ShareGPT and UltraChat are excluded because LongMemEval builds its filler sessions from them. `lme_contexts` reads LongMemEval-S only to prepare evaluation inputs.
 
 ## Run
 
