@@ -98,6 +98,8 @@ dist/
 
 # LongMemEval dataset (downloaded)
 benchmarks/longmemeval/data/
+# End-to-end QA runs (contexts hold dataset text; reports are committed separately)
+benchmarks/qa/runs/
 
 # Hypothesis example database
 .hypothesis/
