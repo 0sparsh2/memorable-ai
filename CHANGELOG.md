@@ -54,6 +54,7 @@ Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instru
     - the user's next message: 0.6 (patterns for now).
   - Offered tools (`tools=` / `functions=`) and used tools are recorded per task, with LLM-call, tool-call and error counts.
   - `engine.list_tasks()` and `engine.get_task()` (scoped to the caller) read tasks back. Turns get `task_id` plus `part_of` edges, and tasks get `part_of` edges to their episode.
+- `engine.record_trace(goal, steps, outcome=None, ...)`: records an agent run from any framework (no intercepted SDK needed) as L0 events plus one explicit task. Steps take tool, args, result, error flag and rationale; tool signals label the task when no outcome is given.
   - Benchmarks: `benchmarks/embeddings/turn_signals.py` (fusion rules, rerankers, bootstrap CIs on LoCoMo and LongMemEval) and `bench_rerank_latency.py`. `retrieval_eval.py` gains `turn/pipeline`, `--fusion` and `--rerank`.
   - `training/kaggle/`: synthetic memory-QA generation and contrastive / reranker fine-tuning jobs (Kaggle GPUs).
 

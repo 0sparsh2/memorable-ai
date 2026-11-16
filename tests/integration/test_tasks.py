@@ -129,3 +129,30 @@ def test_interceptor_records_offered_tools_and_task(engine_factory):
         assert (t["outcome"], t["outcome_source"]) == ("success", "signal"), "HTTP 200 in the last result"
     finally:
         eng.disable()
+
+
+@pytest.mark.asyncio
+async def test_record_trace_from_any_framework(eng):
+    t = await eng.record_trace(
+        "Fix the failing login test",
+        steps=[
+            {"tool": "bash", "args": {"cmd": "pytest tests/test_api.py"}, "result": "1 failed", "rationale": "reproduce first"},
+            {"tool": "edit", "args": {"path": "api/auth.py", "line": 42}, "result": {"ok": True}},
+            {"tool": "bash", "args": {"cmd": "pytest tests/test_api.py"}, "result": "12 passed in 0.4s"},
+        ],
+        final_answer="Fixed the token expiry check in api/auth.py:42.",
+        user_id="fay", agent_id="coder",
+    )
+    assert t["goal"] == "Fix the failing login test" and t["explicit"]
+    assert t["used_tools"] == ["bash", "edit"] and t["tool_calls"] == 3
+    assert (t["outcome"], t["outcome_source"]) == ("success", "signal"), "last step: tests passed"
+    events = eng.get_task(t["id"], user_id="fay")["events"]
+    assert [e["event_kind"] for e in events] == [
+        "message", "message", "tool_call", "tool_result", "tool_call", "tool_result", "tool_call", "tool_result",
+        "message"]
+    failed = await eng.record_trace("Deploy", steps=[{"tool": "deploy", "args": {}, "result": "boom", "is_error": True}],
+                                    user_id="fay")
+    assert failed["outcome"] == "failure" and failed["error_count"] == 1
+    told = await eng.record_trace("Book a table", steps=[{"tool": "book", "args": {"n": 2}, "result": "ok"}],
+                                  outcome="success", outcome_reason="user confirmed", user_id="fay")
+    assert (told["outcome"], told["outcome_source"], told["outcome_reason"]) == ("success", "explicit", "user confirmed")

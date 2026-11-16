@@ -20,6 +20,7 @@ go to a shared pool that user-scoped calls never see.
 
 import contextlib
 import hashlib
+import json
 from collections import OrderedDict
 import logging
 from contextlib import contextmanager
@@ -695,6 +696,47 @@ class MemoryEngine:
             finally:
                 _current_task.reset(token)
                 self._tasks.close(handle.id, "explicit")
+
+    async def record_trace(
+        self,
+        goal: str,
+        steps: Sequence[Dict[str, Any]],
+        outcome: Optional[str] = None,
+        outcome_reason: Optional[str] = None,
+        final_answer: Optional[str] = None,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Record an agent run that did not go through an intercepted SDK (any framework).
+
+        ``steps``: ``[{"tool": name, "args": {...}, "result": ..., "is_error": bool,
+        "rationale": "why"}]``. The run becomes L0 events (redacted, size-capped) and one
+        explicit task. ``outcome`` ("success" / "failure") is recorded with confidence 1.0;
+        without it, tool signals label the task (e.g. a failing last step).
+        """
+        messages: List[Dict[str, Any]] = [{"role": "user", "content": goal}]
+        for n, st in enumerate(steps or []):
+            cid = f"trace-{n}"
+            if st.get("rationale"):
+                messages.append({"role": "assistant", "content": str(st["rationale"])})
+            args = st.get("args")
+            messages.append({"role": "assistant", "tool_calls": [{"id": cid, "type": "function", "function": {
+                "name": st.get("tool") or "tool",
+                "arguments": args if isinstance(args, str) else json.dumps(args or {}, default=str)}}]})
+            res = st.get("result")
+            content = res if isinstance(res, str) else json.dumps(res, default=str)
+            if st.get("is_error") and not isinstance(res, dict):
+                content = json.dumps({"error": content})
+            elif st.get("is_error"):
+                content = json.dumps({**res, "error": res.get("error") or True}, default=str)
+            messages.append({"role": "tool", "tool_call_id": cid, "content": content})
+        with self.task(goal, user_id=user_id, session_id=session_id, agent_id=agent_id) as t:
+            await self.ingest(messages, final_answer)
+            if outcome in ("success", "failure"):
+                (t.success if outcome == "success" else t.failure)(outcome_reason)
+        return self._tasks.get(t.id, t.user_id).get("task", {})
 
     def mark_outcome(
         self, success: bool, reason: Optional[str] = None, task_id: Optional[int] = None,
