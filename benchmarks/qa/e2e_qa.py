@@ -366,6 +366,14 @@ class RateLimiter:
 
 
 LIMITER = RateLimiter(0)
+ERROR_LOG: Optional[Path] = None  # every failed attempt, timestamped (set by the answer stage)
+
+
+def _log_error(kind: str, err: Exception, attempt: int) -> None:
+    if ERROR_LOG is not None:
+        with open(ERROR_LOG, "a") as f:
+            f.write(json.dumps({"ts": round(time.time(), 1), "kind": kind, "attempt": attempt,
+                                "error": f"{type(err).__name__}: {str(err)[:160]}"}) + "\n")
 
 
 _NIM: Dict[str, Any] = {}
@@ -430,6 +438,7 @@ async def llm_call(prompt: str, *, system: Optional[str], effort: str, max_token
         except Exception as e:  # noqa: BLE001 - provider errors vary
             last = e
             msg = str(e).lower()
+            _log_error("call", e, n429 + nother)
             if ("429" in msg or "too many requests" in msg or "rate" in msg) and n429 < len(waits_429):
                 await asyncio.sleep(waits_429[n429])
                 n429 += 1
@@ -538,9 +547,10 @@ async def answer_one(rec: Dict[str, Any], ledger: Ledger, stub: bool, sem) -> Di
 
 
 async def cmd_answer(args) -> None:
-    global LIMITER
+    global LIMITER, ERROR_LOG
     LIMITER = RateLimiter(args.rpm)
     run = Path(args.run)
+    ERROR_LOG = run / "errors.jsonl"
     tag = "stub" if args.stub else "live"
     ledger = Ledger(run / f"ledger_{tag}.jsonl", args.cap)
     done_path = run / f"answers_{tag}.jsonl"
