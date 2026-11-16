@@ -56,7 +56,7 @@ The answers come from what other memory systems and standards actually do, plus 
 | AutoGen bridge | [autogen.py](../memorable_ai/integrations/autogen.py) | Calls compatibility helpers. AutoGen has been in maintenance mode since Q1 2026; Microsoft Agent Framework 1.0 replaced it ([report](https://newclawtimes.com/articles/langgraph-crewai-autogen-2026-framework-platform-comparison/)) | Replace with a Microsoft Agent Framework adapter |
 | CrewAI helper | [crewai.py](../memorable_ai/integrations/crewai.py) | Wraps `search_memories` into a string; works around event loops with a thread pool | Replace with an adapter for CrewAI's native memory |
 | Mem0 adapter | [mem0_adapter.py](../memorable_ai/integrations/mem0_adapter.py) | Wraps the Mem0 cloud client; not wired into anything | Remove, or turn into a one-off importer |
-| NVIDIA NIM | [nvidia_nim.py](../memorable_ai/integrations/nvidia_nim.py) | Model registry; `DEFAULT_MEMORY_MODEL = deepseek-ai/deepseek-v4-flash` | **Default LLM for the memory pipeline** (D5) |
+| NVIDIA NIM | [nvidia_nim.py](../memorable_ai/integrations/nvidia_nim.py) | Model registry; `DEFAULT_MEMORY_MODEL = nvidia/nemotron-3.5-lightning-30b-a3b` (deepseek-v4-flash retired 2026-08-07) | **Default LLM for the memory pipeline** (D5) |
 | Connectors | [connectors/base.py](../memorable_ai/connectors/base.py) | Stub | Later |
 | **Missing** | — | • `agent_id` scope<br>• MCP server<br>• OTel spans (emit or ingest)<br>• framework-native memory interfaces<br>• trace import | See §2.2 |
 

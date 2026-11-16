@@ -19,66 +19,38 @@ NIM_API_BASE = "https://integrate.api.nvidia.com/v1"
 NIM_CHAT_COMPLETIONS_PATH = "/chat/completions"
 LITELLM_PROVIDER_PREFIX = "nvidia_nim/"
 
-# Curated from https://docs.api.nvidia.com/nim/reference/llm-apis (chat completion models)
+# Chat models checked against integrate.api.nvidia.com on 2026-11-16 (free tier). NIM retires
+# models often: deepseek-v4-flash (the old default), llama-3.1-8b and others now return 410
+# Gone, and several listed models return 404. `fetch_available_models()` lists what is live.
 NIM_LLM_MODELS: Dict[str, str] = {
-    # deepseek-ai
-    "deepseek-ai/deepseek-v4-flash": "Fast; best default for Memorable extraction",
-    "deepseek-ai/deepseek-v4-pro": "High quality; slow — may 504 on long runs",
-    # meta
-    "meta/llama-3.1-8b-instruct": "Fast, lightweight",
-    "meta/llama-3.1-70b-instruct": "Balanced general instruct",
-    "meta/llama-3.2-1b-instruct": "Very fast, small",
-    "meta/llama-3.2-3b-instruct": "Fast, small",
-    "meta/llama-3.3-70b-instruct": "Strong general instruct",
-    "meta/llama2-70b": "Legacy chat completion",
-    # nvidia
-    "nvidia/nemotron-3-nano-30b-a3b": "NVIDIA nano — good speed/quality",
-    "nvidia/nemotron-3-super-120b-a12b": "Large NVIDIA model",
-    "nvidia/nemotron-mini-4b-instruct": "Very fast NVIDIA instruct",
-    "nvidia/nvidia-nemotron-nano-9b-v2": "Compact Nemotron",
-    "nvidia/llama-3.1-nemotron-nano-8b-v1": "Nemotron nano 8B",
-    "nvidia/llama-3.3-nemotron-super-49b-v1": "High capability Nemotron",
-    "nvidia/llama-3.3-nemotron-super-49b-v1.5": "Latest Nemotron super",
-    "nvidia/llama-3.1-nemotron-ultra-253b-v1": "Largest — high latency",
-    # mistralai
-    "mistralai/mistral-7b-instruct-v0.3": "Fast Mistral 7B",
-    "mistralai/mistral-nemotron": "Mistral Nemotron hybrid",
-    "mistralai/mixtral-8x7b-instruct": "Mixtral 8x7B",
-    "mistralai/mixtral-8x22b-instruct": "Mixtral 8x22B",
-    # microsoft
-    "microsoft/phi-4-mini-instruct": "Small Microsoft instruct",
-    "microsoft/phi-4-mini-flash-reasoning": "Phi flash reasoning",
-    # openai (on NIM)
-    "openai/gpt-oss-20b": "Open-weight 20B",
-    "openai/gpt-oss-120b": "Open-weight 120B",
-    # qwen
-    "qwen/qwen2.5-coder-32b-instruct": "Code-focused",
-    "qwen/qwen3-next-80b-a3b-instruct": "Qwen3 next instruct",
-    "qwen/qwq-32b": "Qwen reasoning",
-    # moonshotai
-    "moonshotai/kimi-k2-instruct": "Kimi K2 instruct",
-    # google (on NIM)
-    "google/gemma-2-2b-it": "Small Gemma",
-    "google/codegemma-7b": "Code Gemma",
+    # measured: correct answers, 0.2-6 s per call; reasons by default (chat_template_kwargs.enable_thinking)
+    "nvidia/nemotron-3.5-lightning-30b-a3b": "Default: fast MoE (3B active), reasoning on by default",
+    # measured: 4-7 s for ~500 output tokens, thinking off
+    "nvidia/nemotron-3.5-bolt-e4b": "Fast small model; good for short structured generation",
+    # measured: correct, but the free tier queues it (110-500 s per call)
+    "deepseek-ai/deepseek-v4.1-flash": "Strong; slow on the free tier",
+    # listed on /v1/models on 2026-11-16, not measured
+    "nvidia/nemotron-3-ultra-550b-a55b": "Largest Nemotron (listed)",
+    "mistralai/mistral-large-4-1t-a52b": "Mistral Large 4 (listed)",
+    "z-ai/glm-5.3-flash": "GLM flash (listed; timed out on the free tier)",
+    "google/gemma-4-31b-it": "Gemma 4 31B (listed; timed out on the free tier)",
+    "openai/gpt-oss-20b": "Open-weight 20B (listed; timed out on the free tier)",
 }
 
 # Defaults for Memorable memory pipeline (extraction / update / summary)
 RECOMMENDED_MEMORY_MODELS: List[str] = [
-    "deepseek-ai/deepseek-v4-flash",
-    "meta/llama-3.3-70b-instruct",
-    "nvidia/nemotron-3-nano-30b-a3b",
-    "nvidia/llama-3.3-nemotron-super-49b-v1.5",
-    "meta/llama-3.1-8b-instruct",
-    "microsoft/phi-4-mini-instruct",
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "nvidia/nemotron-3.5-bolt-e4b",
+    "deepseek-ai/deepseek-v4.1-flash",
 ]
 
 SLOW_MODELS: List[str] = [
-    "deepseek-ai/deepseek-v4-pro",
-    "nvidia/llama-3.1-nemotron-ultra-253b-v1",
-    "qwen/qwen3-coder-480b-a35b-instruct",
+    "deepseek-ai/deepseek-v4.1-flash",
+    "nvidia/nemotron-3-ultra-550b-a55b",
+    "mistralai/mistral-large-4-1t-a52b",
 ]
 
-DEFAULT_MEMORY_MODEL = "deepseek-ai/deepseek-v4-flash"
+DEFAULT_MEMORY_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
 
 
 def is_nim_model(model: str) -> bool:

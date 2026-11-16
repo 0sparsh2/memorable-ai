@@ -22,7 +22,7 @@
 | G-a, G-b | Graph storage | One `edges` table; SQL as the record plus an in-process CSR `GraphEngine` (benchmarked 10–80× faster than the current code, and correct at scale) ([graph doc §3.3](memory_graph_design.md#33-graph-engine-sql-for-durability-an-in-process-sparse-matrix-engine-for-speed-decided)) | delegated, decided on quality and speed |
 | D3 | Payload retention | **Full payloads in the user's own database.** Secrets always redacted; PII configurable; a 256 KB cap for database health; TTL configurable, default keep. Matches Zep / Letta / LangGraph / AgentCore ([norms §1](industry_norms_2026-11.md#1-d3-what-other-systems-keep)) | user: "industry norm" |
 | D4 | Integration surfaces | **Standards first.** Interceptor (have), OpenTelemetry GenAI ingest and emit, MCP server, then framework-native adapters ([norms §2](industry_norms_2026-11.md#2-d4-integration-surfaces)) | user: "industry standards" |
-| D5 | LLM use | **Unconstrained, LLM-first compilation** on NVIDIA NIM (`deepseek-ai/deepseek-v4-flash` default), with deterministic scaffolding and validators | user |
+| D5 | LLM use | **Unconstrained, LLM-first compilation** on NVIDIA NIM (default `nvidia/nemotron-3.5-lightning-30b-a3b` since 2026-11-16; `deepseek-v4-flash` was retired by NIM), with deterministic scaffolding and validators | user |
 | D6 | Name | **Keep "Memorable."** | user |
 
 ---

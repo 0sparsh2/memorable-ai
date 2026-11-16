@@ -236,7 +236,7 @@ Every node and edge carries a tier: **`user`** (private; `user_id` set) or **`or
 
 ## 7. LLM use
 
-The user decided LLM use is unconstrained, using NVIDIA NIM for now. Default model: `DEFAULT_MEMORY_MODEL` in [nvidia_nim.py](../memorable_ai/integrations/nvidia_nim.py) (`deepseek-ai/deepseek-v4-flash`). A stronger model can be set per job, for example dreaming.
+The user decided LLM use is unconstrained, using NVIDIA NIM for now. Default model: `DEFAULT_MEMORY_MODEL` in [nvidia_nim.py](../memorable_ai/integrations/nvidia_nim.py) (`nvidia/nemotron-3.5-lightning-30b-a3b` since 2026-11-16; NIM retired `deepseek-v4-flash`). A stronger model can be set per job, for example dreaming.
 
 | Job | When | Notes |
 |---|---|---|

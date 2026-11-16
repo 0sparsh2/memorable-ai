@@ -55,6 +55,7 @@ Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instru
 - Graph engine memory went from 342 to 101 bytes per edge.
 - `scipy` (imported by the graph engine) is now a declared dependency. Before, it was only installed transitively.
 - `requirements.txt` no longer installs the obsolete PyPI `asyncio` backport (asyncio is in the standard library).
+- The NVIDIA NIM default model (`deepseek-ai/deepseek-v4-flash`) was retired by NIM on 2026-08-07, so every default NIM call failed with 410 Gone. The new default is `nvidia/nemotron-3.5-lightning-30b-a3b`, and the model registry now lists only models checked live on 2026-11-16.
 
 ### Changed
 - `relations` and `mentions` are replaced by `edges`. Existing databases are backfilled once; the legacy tables are left untouched.
