@@ -55,6 +55,7 @@ Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instru
   - Offered tools (`tools=` / `functions=`) and used tools are recorded per task, with LLM-call, tool-call and error counts.
   - `engine.list_tasks()` and `engine.get_task()` (scoped to the caller) read tasks back. Turns get `task_id` plus `part_of` edges, and tasks get `part_of` edges to their episode.
 - `engine.record_trace(goal, steps, outcome=None, ...)`: records an agent run from any framework (no intercepted SDK needed) as L0 events plus one explicit task. Steps take tool, args, result, error flag and rationale; tool signals label the task when no outcome is given.
+- `engine.ingest_otel(spans)`: ingests OpenTelemetry GenAI spans (OTLP-JSON or plain dicts). Chat spans contribute `gen_ai.input.messages` / `gen_ai.output.messages` (text, `tool_call` and `tool_call_response` parts) and `gen_ai.tool.definitions`; `execute_tool` spans contribute tool name, call id, arguments, result and error status. Each conversation (`gen_ai.conversation.id`, else the trace) becomes one canonical event stream with no duplicates, and re-sent exports are idempotent.
   - Benchmarks: `benchmarks/embeddings/turn_signals.py` (fusion rules, rerankers, bootstrap CIs on LoCoMo and LongMemEval) and `bench_rerank_latency.py`. `retrieval_eval.py` gains `turn/pipeline`, `--fusion` and `--rerank`.
   - `training/kaggle/`: synthetic memory-QA generation and contrastive / reranker fine-tuning jobs (Kaggle GPUs).
 

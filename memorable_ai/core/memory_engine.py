@@ -738,6 +738,28 @@ class MemoryEngine:
                 (t.success if outcome == "success" else t.failure)(outcome_reason)
         return self._tasks.get(t.id, t.user_id).get("task", {})
 
+    async def ingest_otel(self, payload: Any, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Ingest OpenTelemetry GenAI spans (OTLP-JSON or plain span dicts): each conversation
+        (``gen_ai.conversation.id``, else the trace) becomes a session of L0 events with
+        tasks segmented as usual. See ``memorable_ai/integrations/otel.py``.
+        """
+        from memorable_ai.integrations.otel import conversations
+
+        self._ensure_components()
+        reports = []
+        for conv in conversations(payload):
+            if not conv["messages"]:
+                continue
+            scope = self.resolve_scope(user_id or conv["user_id"], conv["session_id"], conv["messages"])
+            if conv["agent_id"]:
+                scope = Scope(namespace=scope.namespace, user_id=scope.user_id, session_id=scope.session_id,
+                              agent_id=str(conv["agent_id"]))
+            report = await self._pipeline.ingest(scope, conv["messages"], None, None,
+                                                 task_hint={"offered_tools": conv["offered_tools"]})
+            reports.append({"session_id": scope.session_id, **report.as_dict()})
+        return reports
+
     def mark_outcome(
         self, success: bool, reason: Optional[str] = None, task_id: Optional[int] = None,
         user_id: Optional[str] = None, session_id: Optional[str] = None,
