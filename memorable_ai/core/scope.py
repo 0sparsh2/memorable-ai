@@ -41,6 +41,9 @@ _current_session: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar
 _current_agent: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "memorable_agent_id", default=None
 )
+_current_task: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar(
+    "memorable_current_task", default=None
+)
 _suppress: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "memorable_suppress_interception", default=False
 )
@@ -242,3 +245,9 @@ class BackgroundWorker:
             self.stop(timeout=30.0)
         except Exception:  # pragma: no cover - interpreter shutdown
             pass
+
+
+def current_task() -> Optional[int]:
+    """The explicit task (``engine.task(...)``) the current code runs in, if any."""
+    return _current_task.get()
+

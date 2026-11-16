@@ -64,6 +64,7 @@ class WritePipeline:
         timing: str = "turn",
         context_window: int = 6,
         legacy_log: bool = True,
+        tasks: Optional[Any] = None,
     ):
         self.storage = storage
         self.extractor = extractor
@@ -74,6 +75,7 @@ class WritePipeline:
         self.timing = timing if timing in ("turn", "episode") else "turn"
         self.context_window = context_window
         self.legacy_log = legacy_log
+        self.tasks = tasks  # TaskTracker (procedural P1b)
 
     async def ingest(
         self,
@@ -82,6 +84,7 @@ class WritePipeline:
         response_text: Optional[str] = None,
         occurred_at: Optional[datetime] = None,
         response_events: Optional[Sequence[Any]] = None,
+        task_hint: Optional[Dict[str, Any]] = None,
     ) -> IngestReport:
         report = IngestReport(session_id=scope.session_id, user_id=scope.user_id)
 
@@ -97,6 +100,13 @@ class WritePipeline:
         report.new_turns = len(res.new_turns)
         if not res.new_turns:
             return report
+        if self.tasks is not None:
+            hint = task_hint or {}
+            try:
+                self.tasks.on_events(scope, res.new_turns, offered_tools=hint.get("offered_tools"),
+                                     explicit_task_id=hint.get("task_id"))
+            except Exception as e:  # task segmentation must never break recording
+                logger.warning("Task segmentation failed: %s", e)
         # Facts come from conversation; tool calls/results feed tasks and procedures instead.
         msg_turns = [t for t in res.new_turns if t.get("kind", "message") == "message"]
 

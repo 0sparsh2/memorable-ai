@@ -158,6 +158,43 @@ class Turn(Base):
     __table_args__ = (Index("idx_turn_session_seq", "namespace", "session_id", "seq"),)
 
 
+class Task(Base):
+    """
+    L1 (procedural P1): one goal pursued with tools, segmented from the event stream
+    or declared with ``engine.task()`` (docs/procedural_memory_design.md §4.2, §6).
+    """
+
+    __tablename__ = "tasks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    namespace = Column(String(255), index=True)
+    user_id = Column(String(255), nullable=True, index=True)
+    agent_id = Column(String(255), nullable=True)
+    session_id = Column(String(255), nullable=False, index=True)
+    episode_id = Column(Integer, nullable=True)
+    parent_task_id = Column(Integer, nullable=True)
+    goal_text = Column(Text, nullable=True)
+    explicit = Column(Boolean, default=False)
+    status = Column(String(16), default="open", index=True)  # open | closed
+    close_reason = Column(String(32), nullable=True)  # final_answer | next_user_message | idle | explicit
+    outcome = Column(String(16), default="unknown")  # success | failure | unknown
+    outcome_confidence = Column(Float, default=0.0)
+    outcome_source = Column(String(16), nullable=True)  # explicit | signal | feedback | judge
+    outcome_reason = Column(Text, nullable=True)
+    feedback_seen = Column(Boolean, default=False)
+    offered_tools = Column(JSON, nullable=True)
+    used_tools = Column(JSON, nullable=True)
+    llm_calls = Column(Integer, default=0)
+    tool_calls = Column(Integer, default=0)
+    error_count = Column(Integer, default=0)
+    started_at = Column(DateTime, nullable=True, index=True)
+    last_event_at = Column(DateTime, nullable=True)
+    ended_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    __table_args__ = (Index("idx_task_session", "namespace", "session_id", "status"),)
+
+
 class Episode(Base):
     """L1: a contiguous, topically coherent segment of a session."""
 

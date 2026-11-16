@@ -18,6 +18,7 @@ or pass ``metadata={"user_id": ...}`` in the LLM call. Without a user, memories
 go to a shared pool that user-scoped calls never see.
 """
 
+import contextlib
 import hashlib
 from collections import OrderedDict
 import logging
@@ -36,9 +37,11 @@ from memorable_ai.core.retrieval import HybridRetriever
 from memorable_ai.core.scope import (
     BackgroundWorker,
     Scope,
+    _current_task,
     active_scope,
     current_agent,
     current_session,
+    current_task,
     current_user,
     run_sync,
 )
@@ -63,6 +66,8 @@ class PreparedCall:
     kwargs: Dict[str, Any]
     context: str = ""
     started_at: datetime = field(default_factory=utcnow)
+    task_id: Optional[int] = None  # explicit task (engine.task) active when the call was made
+    offered_tools: List[str] = field(default_factory=list)
 
 
 class MemoryEngine:
@@ -222,6 +227,9 @@ class MemoryEngine:
                 segment_embedder=self._segment_embedder,
                 capture=cfg.memory.capture,
             )
+        from memorable_ai.core.tasks import TaskTracker
+
+        self._tasks = TaskTracker(self._storage, gap_minutes=getattr(cfg.memory.episodic, "gap_minutes", 30.0))
         self._pipeline = WritePipeline(
             storage=self._storage,
             extractor=self._extraction,
@@ -231,6 +239,7 @@ class MemoryEngine:
             summary_store=self._summary_store,
             timing=ext_cfg.timing,
             context_window=ext_cfg.recent_window,
+            tasks=self._tasks,
         )
         if cfg.graph.enabled and cfg.graph.connection_string:
             from memorable_ai.graph.builder import GraphBuilder
@@ -433,7 +442,8 @@ class MemoryEngine:
         context = await self._reusable_context(messages, scope) if messages else ""
         position = getattr(self.config.memory, "injection", "tail")
         new_kwargs = adapter.inject(kwargs, context, position=position) if context else kwargs
-        return PreparedCall(adapter, scope, messages, new_kwargs, context)
+        return PreparedCall(adapter, scope, messages, new_kwargs, context,
+                            task_id=current_task(), offered_tools=adapter.get_tools(kwargs))
 
     def _prepare_call(self, adapter: Adapter, kwargs: Dict[str, Any]) -> PreparedCall:
         return run_sync(lambda: self._aprepare_call(adapter, kwargs), timeout=30)
@@ -446,16 +456,18 @@ class MemoryEngine:
         """
         if not call.messages and not text and not events:
             return
+        hint = {"task_id": call.task_id, "offered_tools": call.offered_tools}
         job = lambda: self._pipeline.ingest(  # noqa: E731
-            call.scope, call.messages, text, call.started_at, response_events=events)
+            call.scope, call.messages, text, call.started_at, response_events=events, task_hint=hint)
         if self._worker is not None:
             self._worker.submit(job)
         else:
             run_sync(job)
 
     async def _arecord_call(self, call: PreparedCall, text: str, events: Optional[List[Any]] = None) -> None:
+        hint = {"task_id": call.task_id, "offered_tools": call.offered_tools}
         job = lambda: self._pipeline.ingest(  # noqa: E731
-            call.scope, call.messages, text, call.started_at, response_events=events)
+            call.scope, call.messages, text, call.started_at, response_events=events, task_hint=hint)
         if self._worker is not None:
             self._worker.submit(job)
         else:
@@ -529,7 +541,8 @@ class MemoryEngine:
         self._ensure_components()
         scope = self.resolve_scope(user_id, session_id, messages)
         text = response if isinstance(response, str) else response_text(response)
-        report = await self._pipeline.ingest(scope, list(messages), text, occurred_at)
+        report = await self._pipeline.ingest(scope, list(messages), text, occurred_at,
+                                             task_hint={"task_id": current_task()})
         return report.as_dict()
 
     async def end_session(self, user_id: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:
@@ -655,6 +668,56 @@ class MemoryEngine:
         scope = self.resolve_scope(user_id, session_id, messages)
         return await self._context_for(messages, scope)
 
+    @contextlib.contextmanager
+    def task(
+        self, goal: str, user_id: Optional[str] = None, session_id: Optional[str] = None,
+        agent_id: Optional[str] = None, parent_task_id: Optional[int] = None,
+    ) -> Iterator["TaskHandle"]:
+        """
+        Declare a task: every event recorded inside the block (intercepted calls or
+        ``ingest``) attaches to it. Report the outcome with ``t.success()`` / ``t.failure()``;
+        otherwise tool signals label it when the block exits. An exception marks it failed.
+        """
+        self._ensure_components()
+        scope = self.resolve_scope(user_id, session_id, [{"role": "user", "content": goal}])
+        if agent_id:
+            scope = Scope(namespace=scope.namespace, user_id=scope.user_id, session_id=scope.session_id,
+                          agent_id=agent_id)
+        handle = TaskHandle(self, self._tasks.open_explicit(scope, goal, parent_task_id), scope.user_id)
+        with active_scope(user_id=scope.user_id, session_id=scope.session_id, agent_id=scope.agent_id):
+            token = _current_task.set(handle.id)
+            try:
+                yield handle
+            except Exception as e:
+                if handle.outcome is None:
+                    handle.failure(f"exception: {type(e).__name__}: {str(e)[:200]}")
+                raise
+            finally:
+                _current_task.reset(token)
+                self._tasks.close(handle.id, "explicit")
+
+    def mark_outcome(
+        self, success: bool, reason: Optional[str] = None, task_id: Optional[int] = None,
+        user_id: Optional[str] = None, session_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Record a task's outcome (confidence 1.0). Defaults to the current or latest task in scope."""
+        self._ensure_components()
+        tid = task_id or current_task() or self._tasks.latest(self.resolve_scope(user_id, session_id))
+        return self._tasks.set_outcome(tid, success, reason) if tid else None
+
+    def list_tasks(
+        self, user_id: Optional[str] = None, session_id: Optional[str] = None, limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Tasks in scope, newest first (one session if one is in scope, otherwise all of the user's)."""
+        self._ensure_components()
+        scope = self.resolve_scope(user_id, session_id)
+        return self._tasks.list(scope, limit=limit, any_session=not (session_id or current_session()))
+
+    def get_task(self, task_id: int, user_id: Optional[str] = None) -> Dict[str, Any]:
+        """A task with its events in order; another user's task returns ``{}``."""
+        self._ensure_components()
+        return self._tasks.get(task_id, self._canonical(user_id or current_user()))
+
     def expand(self, kind: str, item_id: int, user_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Restore what a summary or fact came from, within the caller's scope.
@@ -728,3 +791,22 @@ class MemoryEngine:
             except Exception:
                 pass
         return stats
+
+
+class TaskHandle:
+    """Returned by ``engine.task(...)``: report the task's outcome."""
+
+    def __init__(self, engine: "MemoryEngine", task_id: int, user_id: Optional[str] = None):
+        self.engine, self.id, self.user_id, self.outcome = engine, task_id, user_id, None
+
+    def success(self, reason: Optional[str] = None) -> None:
+        self.outcome = "success"
+        self.engine._tasks.set_outcome(self.id, True, reason)
+
+    def failure(self, reason: Optional[str] = None) -> None:
+        self.outcome = "failure"
+        self.engine._tasks.set_outcome(self.id, False, reason)
+
+    def info(self) -> Dict[str, Any]:
+        return self.engine._tasks.get(self.id, self.user_id).get("task", {})
+

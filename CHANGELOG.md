@@ -46,6 +46,14 @@ Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instru
   - Tool events are not embedded, are not excerpt candidates, and do not drive episode segmentation or fact extraction.
   - Resent agent histories stay idempotent; message hashes are unchanged, so existing databases need no rewrite.
   - `capture.tool_events=False` turns capture off.
+- **Tasks and outcomes** (procedural memory P1b, design §6):
+  - A `TaskTracker` segments each session's event stream into tasks. A task opens at the user message that leads to a tool call (that message is the goal). It closes at a tool-free answer, at the next user message, or after the idle gap. Follow-ups such as "now do the same for auth" open a child task (`parent_task_id`).
+  - Outcomes come from the strongest available source:
+    - explicit: confidence 1.0, via `with engine.task("...") as t:` + `t.success()` / `t.failure()`, or `engine.mark_outcome()`; an exception in the block marks the task failed;
+    - tool signals: 0.8 (tool errors, test summaries, HTTP status, exit codes);
+    - the user's next message: 0.6 (patterns for now).
+  - Offered tools (`tools=` / `functions=`) and used tools are recorded per task, with LLM-call, tool-call and error counts.
+  - `engine.list_tasks()` and `engine.get_task()` (scoped to the caller) read tasks back. Turns get `task_id` plus `part_of` edges, and tasks get `part_of` edges to their episode.
   - Benchmarks: `benchmarks/embeddings/turn_signals.py` (fusion rules, rerankers, bootstrap CIs on LoCoMo and LongMemEval) and `bench_rerank_latency.py`. `retrieval_eval.py` gains `turn/pipeline`, `--fusion` and `--rerank`.
   - `training/kaggle/`: synthetic memory-QA generation and contrastive / reranker fine-tuning jobs (Kaggle GPUs).
 

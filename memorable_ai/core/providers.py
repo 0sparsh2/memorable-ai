@@ -59,6 +59,16 @@ class Adapter:
         """Add ``context`` to the request: "tail" (latest user message) or "system" (system prompt)."""
         raise NotImplementedError
 
+    def get_tools(self, kwargs: Dict[str, Any]) -> List[str]:
+        """Names of the tools offered to the model in this call (OpenAI, Anthropic and Responses shapes)."""
+        names: List[str] = []
+        for t in list(kwargs.get("tools") or []) + list(kwargs.get("functions") or []):
+            fn = _get(t, "function")
+            name = _get(fn, "name") if fn is not None else (_get(t, "name") or _get(t, "type"))
+            if name and name not in names:
+                names.append(str(name))
+        return names
+
     def is_stream(self, kwargs: Dict[str, Any]) -> bool:
         return kwargs.get("stream") is True
 
