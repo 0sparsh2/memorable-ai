@@ -115,3 +115,26 @@ First stage: score fusion, top 20; each reranker reorders those 20.
 - Settings `rerank_depth` (20) and `rerank_blend` (0).
 - The reranker is opt-in for now (`rerank=True`). The default model is chosen after the conversation-tuned rerankers (§4).
 
+## 4. Fine-tuning, round 1 (2,559 synthetic questions)
+
+**Data.** Data generation fell short of plan. On Kaggle's T4s, vLLM produced about 13 output tokens/s: one 400-conversation chunk in 2.8 h before the job's time limit. That chunk (2,283 questions) plus the smoke run (276) became round 1, about 1/30 of the planned 7,500 conversations. The remaining prompts are being generated on NVIDIA NIM (Nemotron-3.5-Bolt, free tier) for round 2.
+
+**Training.** Teacher filter: 2,436 → 2,239 questions; 2,469 training pairs. All seven runs took 6 min on 2× T4. On held-out synthetic conversations every model improved: leaf-ir 0.832 → 0.858, MiniLM 0.717 → 0.832, potion 0.664 → 0.699, the MiniLM reranker 0.797 → 0.876, Ettin-17M 0.823 → 0.841, Ettin-32M 0.867 → 0.876 ([results_ft_train_v1.json](../benchmarks/embeddings/results_ft_train_v1.json)).
+
+**Verdicts against the §0 bars**, on LoCoMo (1,536 q) and LongMemEval-S (150 q), neither ever trained on ([ft_compare.py](../benchmarks/embeddings/ft_compare.py), [results_ft_compare_v1.json](../benchmarks/embeddings/results_ft_compare_v1.json), run on Kaggle):
+
+| Model | Bar | Result | Verdict |
+|---|---|---|---|
+| **MiniLM (semantic tier)** | episode recall@5 end to end ≥ +1.0 pt; no drop in LME session@5 or LoCoMo turn@5 | episode 0.575 → **0.588** (multi-hop 0.663 → 0.681, temporal 0.502 → 0.530); turn@5 0.701 = 0.701; LME session@5 0.980 = 0.980. Its own dense turn recall: LoCoMo 0.433 → 0.618 (+18.5, CI +16.3…+20.7), LME turn@10 0.813 → 0.873 | **Pass** |
+| leaf-ir (turn model) | LoCoMo fused turn@5 ≥ +1.0, CI > 0 | 0.690 → 0.695 (+0.5, CI −0.5…+1.6); end to end 0.701 → 0.708; LME turn@10 +1.3 (CI −1.3…+4.0) | Fail |
+| potion-32M (fast profile) | improves on both benchmarks | LoCoMo +0.5 (CI +0.1…+1.0); LME turn@10 unchanged | Fail |
+| Ettin-17M reranker | turn@5 and turn@10 improve on both, CI > 0 | LoCoMo +2.9 (CI +1.8…+4.1); LME −0.7 (CI −2.0…0.0) | Fail |
+| MiniLM-L6 reranker | same | LoCoMo **0.748 → 0.801** (+5.3, CI +4.1…+6.6); LME +0.7 (CI −1.3…+2.7) | Fail |
+| Ettin-32M reranker | same | LoCoMo 0.771 → 0.809 (+3.8, CI +2.6…+4.9); LME ±0 | Fail |
+
+**Reading.**
+- With 1/30 of the planned data, fine-tuning already helps the semantic model a lot, and the rerankers on LoCoMo by up to 5 points (significant).
+- On LongMemEval the rerankers show no measurable change. It sits near its ceiling (about 0.92 turn@10), and 150 questions resolve only about ±3 points.
+- The bar asks for improvement on both benchmarks and is not relaxed after the fact. Round 2 re-tests every model under the same bars with the NIM-generated data.
+- **A4** in the end-to-end QA eval (`benchmarks/qa`) = A3 with the fine-tuned MiniLM, the only model that passed. It is built after round 2, so that one A4 arm carries every model that passes then.
+

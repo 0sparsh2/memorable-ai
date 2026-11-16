@@ -1,0 +1,78 @@
+{
+  "filter": {
+    "questions": 2436,
+    "kept": 2239,
+    "no_hard_neg": 124
+  },
+  "pairs": 2469,
+  "runs": [
+    {
+      "name": "leafir",
+      "base": "MongoDB/mdbr-leaf-ir",
+      "lr": 2e-05,
+      "epochs": 1,
+      "examples": 2469,
+      "dev_recall@5_before": 0.8319,
+      "dev_recall@5_after": 0.8584,
+      "secs": 34
+    },
+    {
+      "name": "minilm",
+      "base": "sentence-transformers/all-MiniLM-L6-v2",
+      "lr": 3e-05,
+      "epochs": 1,
+      "examples": 4938,
+      "dev_recall@5_before": 0.7168,
+      "dev_recall@5_after": 0.8319,
+      "secs": 65
+    },
+    {
+      "name": "potion_lr01",
+      "base": "minishlab/potion-base-32M",
+      "lr": 0.01,
+      "epochs": 1,
+      "examples": 2469,
+      "dev_recall@5_before": 0.6637,
+      "dev_recall@5_after": 0.6726,
+      "secs": 4
+    },
+    {
+      "name": "potion_lr05",
+      "base": "minishlab/potion-base-32M",
+      "lr": 0.05,
+      "epochs": 1,
+      "examples": 2469,
+      "dev_recall@5_before": 0.6637,
+      "dev_recall@5_after": 0.6991,
+      "secs": 3
+    },
+    {
+      "name": "ce_minilm",
+      "base": "cross-encoder/ms-marco-MiniLM-L6-v2",
+      "lr": 2e-05,
+      "pairs": 11467,
+      "dev_recall@5_before": 0.7965,
+      "dev_recall@5_after": 0.8761,
+      "secs": 40
+    },
+    {
+      "name": "ce_ettin17",
+      "base": "cross-encoder/ettin-reranker-17m-v1",
+      "lr": 3e-05,
+      "pairs": 11467,
+      "dev_recall@5_before": 0.823,
+      "dev_recall@5_after": 0.8407,
+      "secs": 32
+    },
+    {
+      "name": "ce_ettin32",
+      "base": "cross-encoder/ettin-reranker-32m-v1",
+      "lr": 2e-05,
+      "pairs": 11467,
+      "dev_recall@5_before": 0.8673,
+      "dev_recall@5_after": 0.8761,
+      "secs": 63
+    }
+  ],
+  "wall_s": 369
+}
