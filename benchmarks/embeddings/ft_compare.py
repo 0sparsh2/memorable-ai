@@ -18,7 +18,7 @@ import time
 
 import numpy as np
 
-from benchmarks.embeddings.turn_signals import (LEAF, MINILM, POTION, RRF_K, hits, load_lme, load_locomo, paired_ci,
+from benchmarks.embeddings.turn_signals import (LEAF, MINILM, POTION, hits, load_lme, load_locomo, paired_ci,
                                                 rank_all, signal_scores, summarize)
 
 RERANKERS = {"ettin17": "cross-encoder/ettin-reranker-17m-v1", "minilm-ce": "cross-encoder/ms-marco-MiniLM-L6-v2",
