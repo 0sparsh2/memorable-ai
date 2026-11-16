@@ -39,7 +39,7 @@ QUOTAS = {
     "soda": "1 fact, 1 preference, 1 paraphrase",
     "wildchat": "1 user-fact, 1 assistant-recall, 1 preference, 1 paraphrase",
 }
-GEN_BUDGET_S = 3 * 3600  # stop generating after this; finished chunks are kept
+GEN_BUDGET_S = int(2.5 * 3600)  # stop generating after this; finished chunks are kept
 if SMOKE:
     COUNTS = {k: 12 for k in COUNTS}
 MAX_PROMPT_TOKENS = 5000
@@ -333,6 +333,8 @@ def main():
                 n_out += int((row != tok.pad_token_id).sum())
             n_in += int(x["attention_mask"].sum())
     json.dump({"texts": texts, "n_in": n_in, "n_out": n_out, "secs": time.time() - t0}, open(path_out, "w"))
+    sys.stdout.flush()
+    os._exit(0)  # vLLM's engine processes can keep a normal interpreter exit hanging forever
 
 
 if __name__ == "__main__":
@@ -363,6 +365,13 @@ def generate(prompts, backend):
                                        f"{OUT}/shard_out_{r}.json", backend.split(":")[0], MODEL,
                                        str(MAX_PROMPT_TOKENS + 1100), str(SEED),
                                        str(time.time() + GEN_BUDGET_S)], env=env))
+    hard_stop = time.time() + GEN_BUDGET_S + 20 * 60  # never wait forever on a hung worker
+    while any(p.poll() is None for p in procs) and time.time() < hard_stop:
+        time.sleep(10)
+    for p in procs:
+        if p.poll() is None:
+            print("worker still running at the hard stop; killing it and keeping its last chunk", flush=True)
+            p.kill()
     codes = [p.wait() for p in procs]
     if any(codes) and not all(os.path.exists(f"{OUT}/shard_out_{r}.json") for r in range(n_gpu)):
         raise RuntimeError(f"{backend} workers failed: {codes}")
