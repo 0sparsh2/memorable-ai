@@ -83,6 +83,19 @@ class Adapter:
     def stream_delta(self, chunk: Any) -> str:
         return ""
 
+    def stream_tools(self, chunk: Any, acc: Dict[Any, Dict[str, Any]]) -> None:
+        """Accumulate streamed tool-call fragments into ``acc`` (provider-specific)."""
+        return None
+
+    def stream_events(self, text: str, acc: Dict[Any, Dict[str, Any]]) -> List[Any]:
+        """A finished stream as L0 events: its text plus the tool calls assembled from fragments."""
+        calls = sorted(acc.values(), key=lambda c: c.get("order", 0))
+        msg: Dict[str, Any] = {"role": "assistant", "content": text or None}
+        if calls:
+            msg["tool_calls"] = [{"id": c.get("id"), "type": "function", "function": {
+                "name": c.get("name"), "arguments": "".join(c.get("args") or []) or "{}"}} for c in calls]
+        return [msg] if (text or calls) else []
+
 
 def memory_block(context: str) -> str:
     """Retrieved memory, delimited so it reads as reference data next to the user's own words."""
@@ -171,6 +184,20 @@ class OpenAIChatAdapter(Adapter):
         return [{"role": "assistant", "content": _get(msg, "content"), "tool_calls": _get(msg, "tool_calls"),
                  "function_call": _get(msg, "function_call")}]
 
+    def stream_tools(self, chunk: Any, acc: Dict[Any, Dict[str, Any]]) -> None:
+        choices = _get(chunk, "choices") or []
+        delta = _get(choices[0], "delta") if choices else None
+        for tc in (_get(delta, "tool_calls") or []) if delta is not None else []:
+            slot = acc.setdefault(("openai", _get(tc, "index") or 0), {"order": len(acc), "args": []})
+            if _get(tc, "id"):
+                slot["id"] = _get(tc, "id")
+            fn = _get(tc, "function")
+            if fn is not None:
+                if _get(fn, "name"):
+                    slot["name"] = _get(fn, "name")
+                if _get(fn, "arguments"):
+                    slot["args"].append(_get(fn, "arguments"))
+
     def stream_delta(self, chunk: Any) -> str:
         choices = _get(chunk, "choices") or []
         if not choices:
@@ -227,6 +254,19 @@ class AnthropicAdapter(Adapter):
         if not content:
             return super().response_events(response)
         return [{"role": "assistant", "content": list(content)}]
+
+    def stream_tools(self, chunk: Any, acc: Dict[Any, Dict[str, Any]]) -> None:
+        typ = _get(chunk, "type")
+        if typ == "content_block_start":
+            block = _get(chunk, "content_block")
+            if _get(block, "type") == "tool_use":
+                acc[("anthropic", _get(chunk, "index"))] = {"order": len(acc), "id": _get(block, "id"),
+                                                             "name": _get(block, "name"), "args": []}
+        elif typ == "content_block_delta":
+            delta = _get(chunk, "delta")
+            slot = acc.get(("anthropic", _get(chunk, "index")))
+            if slot is not None and _get(delta, "type") == "input_json_delta":
+                slot["args"].append(_get(delta, "partial_json") or "")
 
     def stream_delta(self, chunk: Any) -> str:
         if _get(chunk, "type") != "content_block_delta":
@@ -301,6 +341,14 @@ class OpenAIResponsesAdapter(Adapter):
                                "arguments": _get(item, "arguments")})
         return events or super().response_events(response)
 
+    def stream_tools(self, chunk: Any, acc: Dict[Any, Dict[str, Any]]) -> None:
+        if _get(chunk, "type") == "response.output_item.done":
+            item = _get(chunk, "item")
+            if _get(item, "type") == "function_call":
+                acc[("responses", _get(item, "id") or len(acc))] = {
+                    "order": len(acc), "id": _get(item, "call_id"), "name": _get(item, "name"),
+                    "args": [_get(item, "arguments") or ""]}
+
     def stream_delta(self, chunk: Any) -> str:
         if _get(chunk, "type") == "response.output_text.delta":
             return _get(chunk, "delta") or ""
@@ -308,21 +356,29 @@ class OpenAIResponsesAdapter(Adapter):
 
 
 class SyncStreamProxy:
-    """Wraps a sync stream; calls ``on_done(text)`` once the stream ends or closes."""
+    """Wraps a sync stream; calls ``on_done(text, events)`` once the stream ends or closes.
 
-    def __init__(self, stream: Any, adapter: Adapter, on_done: Callable[[str], None]):
+    ``events`` carries streamed tool calls (assembled from fragments), or None for text only.
+    """
+
+    def __init__(self, stream: Any, adapter: Adapter, on_done: Callable[..., None]):
         self._stream = stream
         self._adapter = adapter
         self._on_done = on_done
         self._parts: List[str] = []
+        self._tools: Dict[Any, Dict[str, Any]] = {}
         self._it = None
         self._done = False
 
     def _finish(self) -> None:
         if not self._done:
             self._done = True
+            text = "".join(self._parts)
             try:
-                self._on_done("".join(self._parts))
+                if self._tools:  # tool calls streamed: hand over the assembled events too
+                    self._on_done(text, self._adapter.stream_events(text, self._tools))
+                else:  # text-only streams keep the one-argument callback
+                    self._on_done(text)
             except Exception:
                 pass
 
@@ -339,6 +395,7 @@ class SyncStreamProxy:
             raise
         try:
             self._parts.append(self._adapter.stream_delta(chunk))
+            self._adapter.stream_tools(chunk, self._tools)
         except Exception:
             pass
         return chunk
@@ -366,19 +423,24 @@ class SyncStreamProxy:
 class AsyncStreamProxy:
     """Async counterpart of :class:`SyncStreamProxy`."""
 
-    def __init__(self, stream: Any, adapter: Adapter, on_done: Callable[[str], None]):
+    def __init__(self, stream: Any, adapter: Adapter, on_done: Callable[..., None]):
         self._stream = stream
         self._adapter = adapter
         self._on_done = on_done
         self._parts: List[str] = []
+        self._tools: Dict[Any, Dict[str, Any]] = {}
         self._it = None
         self._done = False
 
     def _finish(self) -> None:
         if not self._done:
             self._done = True
+            text = "".join(self._parts)
             try:
-                self._on_done("".join(self._parts))
+                if self._tools:  # tool calls streamed: hand over the assembled events too
+                    self._on_done(text, self._adapter.stream_events(text, self._tools))
+                else:  # text-only streams keep the one-argument callback
+                    self._on_done(text)
             except Exception:
                 pass
 
@@ -395,6 +457,7 @@ class AsyncStreamProxy:
             raise
         try:
             self._parts.append(self._adapter.stream_delta(chunk))
+            self._adapter.stream_tools(chunk, self._tools)
         except Exception:
             pass
         return chunk

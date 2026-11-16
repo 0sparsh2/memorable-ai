@@ -40,7 +40,7 @@ Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instru
 - `MemoryEngine.expand("episode" | "fact", id)`: restores the source turns behind an episode summary or a fact, scoped to the caller.
 - **Tool events in L0** (procedural memory P1a, `docs/procedural_memory_design.md` §4.1, §5):
   - Tool calls and tool results are stored as turns (`kind = tool_call | tool_result`) in the session's order, for OpenAI chat, Anthropic content blocks, the OpenAI Responses API and LiteLLM.
-  - The model's own tool calls are recorded too, not just its text (non-streaming calls).
+  - The model's own tool calls are recorded too, not just its text, including streamed calls: OpenAI `delta.tool_calls` fragments, Anthropic `input_json_delta` and Responses `output_item.done`.
   - Payloads are redacted: secrets always, PII per `capture.pii_redaction` (`off` by default, or `emails_phones` / `strict`). They are capped at `capture.max_payload_bytes` (256 KB; head + tail + sha256 + length above it).
   - `salient_values` are extracted before any cut, and the error flag is set conservatively.
   - Tool events are not embedded, are not excerpt candidates, and do not drive episode segmentation or fact extraction.

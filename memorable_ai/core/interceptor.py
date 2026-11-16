@@ -204,7 +204,7 @@ def _make_sync(original: Callable, adapter: Adapter) -> Callable:
         if call is None:
             return response
         if adapter.is_stream(kwargs):
-            return SyncStreamProxy(response, adapter, lambda text: engine._record_call(call, text))
+            return SyncStreamProxy(response, adapter, lambda text, events=None: engine._record_call(call, text, events))
         try:
             engine._record_call(call, adapter.response_text(response), adapter.response_events(response))
         except Exception as e:
@@ -236,7 +236,7 @@ def _make_async(original: Callable, adapter: Adapter) -> Callable:
         if call is None:
             return response
         if adapter.is_stream(kwargs):
-            return AsyncStreamProxy(response, adapter, lambda text: engine._record_call(call, text))
+            return AsyncStreamProxy(response, adapter, lambda text, events=None: engine._record_call(call, text, events))
         try:
             await engine._arecord_call(call, adapter.response_text(response), adapter.response_events(response))
         except Exception as e:

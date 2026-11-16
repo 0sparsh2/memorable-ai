@@ -147,3 +147,56 @@ async def test_resent_history_with_tool_events_is_idempotent(engine_factory):
                              {"role": "user", "content": "thanks"}], None, user_id="dan", session_id="d1")
     rows = _rows(eng, "d1")
     assert [r["kind"] for r in rows] == ["message", "tool_call", "tool_result", "message", "message"]
+
+
+def test_streamed_tool_calls_are_captured(engine_factory):
+    from tests.integration.test_sdk_interception import _sse
+
+    eng = engine_factory()
+    eng.enable()
+    try:
+        oa_chunks = [
+            {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m", "choices": [{"index": 0, "delta": {
+                "role": "assistant", "tool_calls": [{"index": 0, "id": "call_s1", "type": "function",
+                                                     "function": {"name": "get_weather", "arguments": ""}}]},
+                "finish_reason": None}]},
+            {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m", "choices": [{"index": 0, "delta": {
+                "tool_calls": [{"index": 0, "function": {"arguments": '{"ci'}}]}, "finish_reason": None}]},
+            {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m", "choices": [{"index": 0, "delta": {
+                "tool_calls": [{"index": 0, "function": {"arguments": 'ty": "Oslo"}'}}]}, "finish_reason": "tool_calls"}]},
+        ]
+        rec = Recorder(stream_body=_sse(oa_chunks))
+        with eng.scope(user_id="gus", session_id="st-1"):
+            for _ in _openai(rec).chat.completions.create(
+                    model="m", messages=[{"role": "user", "content": "Weather in Oslo?"}], stream=True):
+                pass
+        rows = _rows(eng, "st-1")
+        assert [r["kind"] for r in rows] == ["message", "tool_call"]
+        assert rows[1]["tool"] == "get_weather" and rows[1]["call"] == "call_s1" and rows[1]["payload"] == {"city": "Oslo"}
+
+        an_events = [
+            {"type": "message_start", "message": {**ANTHROPIC_MSG, "content": [], "stop_reason": None}},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Listing files."}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "tu_s", "name": "bash",
+                                                                           "input": {}}},
+            {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": '{"cmd": '}},
+            {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": '"ls -la"}'}},
+            {"type": "content_block_stop", "index": 1},
+            {"type": "message_delta", "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+             "usage": {"output_tokens": 9}},
+            {"type": "message_stop"},
+        ]
+        rec_a = Recorder(stream_body=_sse(an_events, named=True))
+        with eng.scope(user_id="gus", session_id="st-2"):
+            stream = _anthropic(rec_a).messages.create(model="claude-test", max_tokens=50, stream=True,
+                                                       messages=[{"role": "user", "content": "What files are here?"}])
+            for _ in stream:
+                pass
+        rows = _rows(eng, "st-2")
+        assert [r["kind"] for r in rows] == ["message", "message", "tool_call"]
+        assert rows[1]["content"] == "Listing files." and rows[2]["tool"] == "bash"
+        assert rows[2]["payload"] == {"cmd": "ls -la"}
+    finally:
+        eng.disable()
