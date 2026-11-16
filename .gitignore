@@ -103,3 +103,6 @@ benchmarks/qa/runs/
 
 # Hypothesis example database
 .hypothesis/
+
+# Generated training data (public-corpus text; reproducible from training/)
+training/data/

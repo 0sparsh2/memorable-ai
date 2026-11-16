@@ -80,12 +80,16 @@ def window_text(conv, idx, k=2):
 
 
 def load():
-    paths = [os.environ["FT_QGEN"]] if os.environ.get("FT_QGEN") else glob.glob("/kaggle/input/**/qgen.jsonl",
-                                                                                   recursive=True)
+    paths = ([os.environ["FT_QGEN"]] if os.environ.get("FT_QGEN")
+             else sorted(glob.glob("/kaggle/input/**/qgen*.jsonl", recursive=True)))
     if not paths:
         raise SystemExit("qgen.jsonl not found under /kaggle/input")
-    convs = [json.loads(line) for line in open(paths[0])]
-    convs = [c for c in convs if c.get("questions") and len(c["turns"]) >= 4]
+    convs = []
+    for path in paths:  # every qgen*.jsonl found (Kaggle generation, salvaged chunks, NIM generation)
+        convs += [json.loads(line) for line in open(path)]
+    for c in convs:  # generators sometimes write a statement instead of a question
+        c["questions"] = [q for q in c.get("questions") or [] if "?" in q["q"]]
+    convs = [c for c in convs if c["questions"] and len(c["turns"]) >= 4]
     rng = random.Random(SEED)
     rng.shuffle(convs)
     n_dev = 6 if DRY else max(20, int(len(convs) * DEV_FRACTION))

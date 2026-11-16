@@ -29,6 +29,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("job")
     ap.add_argument("--sources", default="", help="kernel outputs to mount, comma separated (user/slug)")
+    ap.add_argument("--datasets", default="", help="datasets to mount, comma separated (user/slug)")
     ap.add_argument("--gpu", default="NvidiaTeslaT4")
     args = ap.parse_args()
     src = os.path.join(HERE, args.job)
@@ -46,7 +47,7 @@ def main():
         "enable_gpu": True,
         "enable_internet": True,
         "machine_shape": args.gpu,
-        "dataset_sources": [],
+        "dataset_sources": [d if "/" in d else f"{user}/{d}" for d in args.datasets.split(",") if d],
         "kernel_sources": [s if "/" in s else f"{user}/{s}" for s in args.sources.split(",") if s],
         "competition_sources": [],
         "model_sources": [],
