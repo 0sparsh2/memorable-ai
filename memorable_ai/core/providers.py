@@ -65,6 +65,11 @@ class Adapter:
     def response_text(self, response: Any) -> str:
         return _response_text(response)
 
+    def response_events(self, response: Any) -> List[Any]:
+        """The model's reply as L0 events (text and tool calls), for recording."""
+        text = self.response_text(response)
+        return [{"role": "assistant", "content": text}] if text else []
+
     def stream_delta(self, chunk: Any) -> str:
         return ""
 
@@ -148,6 +153,14 @@ class OpenAIChatAdapter(Adapter):
         new["messages"] = messages
         return new
 
+    def response_events(self, response: Any) -> List[Any]:
+        choices = _get(response, "choices") or []
+        msg = _get(choices[0], "message") if choices else None
+        if msg is None:
+            return super().response_events(response)
+        return [{"role": "assistant", "content": _get(msg, "content"), "tool_calls": _get(msg, "tool_calls"),
+                 "function_call": _get(msg, "function_call")}]
+
     def stream_delta(self, chunk: Any) -> str:
         choices = _get(chunk, "choices") or []
         if not choices:
@@ -199,6 +212,12 @@ class AnthropicAdapter(Adapter):
             new["system"] = context
         return new
 
+    def response_events(self, response: Any) -> List[Any]:
+        content = _get(response, "content")
+        if not content:
+            return super().response_events(response)
+        return [{"role": "assistant", "content": list(content)}]
+
     def stream_delta(self, chunk: Any) -> str:
         if _get(chunk, "type") != "content_block_delta":
             return ""
@@ -220,8 +239,14 @@ class OpenAIResponsesAdapter(Adapter):
         out: List[Any] = []
         for item in inp or []:
             role = _get(item, "role")
+            typ = _get(item, "type")
             if role in ("user", "assistant", "system", "developer"):
                 out.append({"role": role, "content": _get(item, "content")})
+            elif typ == "function_call":
+                out.append({"type": typ, "name": _get(item, "name"), "call_id": _get(item, "call_id"),
+                            "arguments": _get(item, "arguments")})
+            elif typ == "function_call_output":
+                out.append({"type": typ, "call_id": _get(item, "call_id"), "output": _get(item, "output")})
         return out
 
     def get_hints(self, kwargs: Dict[str, Any]) -> Dict[str, Optional[str]]:
@@ -254,6 +279,17 @@ class OpenAIResponsesAdapter(Adapter):
         if isinstance(text, str) and text:
             return text
         return _response_text(response)
+
+    def response_events(self, response: Any) -> List[Any]:
+        events: List[Any] = []
+        for item in _get(response, "output") or []:
+            typ = _get(item, "type")
+            if typ == "message":
+                events.append({"role": "assistant", "content": _get(item, "content")})
+            elif typ == "function_call":
+                events.append({"type": typ, "name": _get(item, "name"), "call_id": _get(item, "call_id"),
+                               "arguments": _get(item, "arguments")})
+        return events or super().response_events(response)
 
     def stream_delta(self, chunk: Any) -> str:
         if _get(chunk, "type") == "response.output_text.delta":

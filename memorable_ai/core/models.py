@@ -27,6 +27,7 @@ agent produced a row; it is an attribute for ranking/filtering, not an isolation
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    Boolean,
     JSON,
     Column,
     DateTime,
@@ -143,6 +144,16 @@ class Turn(Base):
     created_at = Column(DateTime, default=utcnow)
     embedding = Column(JSON, nullable=True)
     extra_metadata = Column(JSON, nullable=True)
+    # Procedural P1 (docs/procedural_memory_design.md §4.1): tool events live in L0 too.
+    kind = Column(String(16), nullable=True, default="message")  # message | tool_call | tool_result; NULL = message
+    tool_name = Column(String(255), nullable=True)
+    tool_call_id = Column(String(255), nullable=True)
+    payload = Column(JSON, nullable=True)  # redacted args / result; head+tail+sha256 above max_payload_bytes
+    salient_values = Column(JSON, nullable=True)  # values extracted before any size cut (value flow)
+    is_error = Column(Boolean, nullable=True, default=False)
+    task_id = Column(Integer, nullable=True, index=True)
+    source = Column(String(32), nullable=True)  # user | assistant | tool | import | otel
+    trust_tier = Column(String(32), nullable=True)
 
     __table_args__ = (Index("idx_turn_session_seq", "namespace", "session_id", "seq"),)
 

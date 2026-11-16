@@ -38,6 +38,14 @@ Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instru
   - **Cross-encoder reranking of turn excerpts** (opt-in: `rerank=True`), with `rerank_depth` (20) and `rerank_blend` (0). `memorable_ai/core/rerank.py` runs rerankers on ONNX Runtime with identical scores, including modular cross-encoders such as the Ettin family. Ettin-17M adds +5.5 pts LoCoMo turn@5 at about 32–50 ms per query.
   - `VectorIndex.scores_for` / `Storage.vector_scores`: exact cosine for given ids.
 - `MemoryEngine.expand("episode" | "fact", id)`: restores the source turns behind an episode summary or a fact, scoped to the caller.
+- **Tool events in L0** (procedural memory P1a, `docs/procedural_memory_design.md` §4.1, §5):
+  - Tool calls and tool results are stored as turns (`kind = tool_call | tool_result`) in the session's order, for OpenAI chat, Anthropic content blocks, the OpenAI Responses API and LiteLLM.
+  - The model's own tool calls are recorded too, not just its text (non-streaming calls).
+  - Payloads are redacted: secrets always, PII per `capture.pii_redaction` (`off` by default, or `emails_phones` / `strict`). They are capped at `capture.max_payload_bytes` (256 KB; head + tail + sha256 + length above it).
+  - `salient_values` are extracted before any cut, and the error flag is set conservatively.
+  - Tool events are not embedded, are not excerpt candidates, and do not drive episode segmentation or fact extraction.
+  - Resent agent histories stay idempotent; message hashes are unchanged, so existing databases need no rewrite.
+  - `capture.tool_events=False` turns capture off.
   - Benchmarks: `benchmarks/embeddings/turn_signals.py` (fusion rules, rerankers, bootstrap CIs on LoCoMo and LongMemEval) and `bench_rerank_latency.py`. `retrieval_eval.py` gains `turn/pipeline`, `--fusion` and `--rerank`.
   - `training/kaggle/`: synthetic memory-QA generation and contrastive / reranker fine-tuning jobs (Kaggle GPUs).
 

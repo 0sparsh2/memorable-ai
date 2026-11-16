@@ -81,6 +81,7 @@ class WritePipeline:
         messages: Sequence[Any],
         response_text: Optional[str] = None,
         occurred_at: Optional[datetime] = None,
+        response_events: Optional[Sequence[Any]] = None,
     ) -> IngestReport:
         report = IngestReport(session_id=scope.session_id, user_id=scope.user_id)
 
@@ -92,23 +93,25 @@ class WritePipeline:
             report.facts = await self._apply(facts, scope, episode_id=None, turn_ids=None)
             return report
 
-        res = await self.episodic.ingest(scope, messages, response_text, occurred_at)
+        res = await self.episodic.ingest(scope, messages, response_text, occurred_at, response_events=response_events)
         report.new_turns = len(res.new_turns)
         if not res.new_turns:
             return report
+        # Facts come from conversation; tool calls/results feed tasks and procedures instead.
+        msg_turns = [t for t in res.new_turns if t.get("kind", "message") == "message"]
 
-        if self.timing == "turn":
+        if self.timing == "turn" and msg_turns:
             context = self.episodic.recent_turns(
-                scope, limit=self.context_window, before_seq=res.new_turns[0]["seq"]
+                scope, limit=self.context_window, before_seq=msg_turns[0]["seq"]
             )
             summary = await self._summary(scope)
             facts = await self.extractor.extract_from_turns(
-                res.new_turns,
+                msg_turns,
                 context_turns=context,
                 session_summary=summary,
-                session_date=res.new_turns[0]["occurred_at"],
+                session_date=msg_turns[0]["occurred_at"],
             )
-            user_turn_ids = [t["id"] for t in res.new_turns if t["role"] == "user"]
+            user_turn_ids = [t["id"] for t in msg_turns if t["role"] == "user"]
             report.facts.extend(
                 await self._apply(facts, scope, episode_id=res.open_episode_id, turn_ids=user_turn_ids)
             )

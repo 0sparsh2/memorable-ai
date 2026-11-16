@@ -206,7 +206,7 @@ def _make_sync(original: Callable, adapter: Adapter) -> Callable:
         if adapter.is_stream(kwargs):
             return SyncStreamProxy(response, adapter, lambda text: engine._record_call(call, text))
         try:
-            engine._record_call(call, adapter.response_text(response))
+            engine._record_call(call, adapter.response_text(response), adapter.response_events(response))
         except Exception as e:
             logger.warning("Failed to record conversation: %s", e)
         return response
@@ -238,7 +238,7 @@ def _make_async(original: Callable, adapter: Adapter) -> Callable:
         if adapter.is_stream(kwargs):
             return AsyncStreamProxy(response, adapter, lambda text: engine._record_call(call, text))
         try:
-            await engine._arecord_call(call, adapter.response_text(response))
+            await engine._arecord_call(call, adapter.response_text(response), adapter.response_events(response))
         except Exception as e:
             logger.warning("Failed to record conversation: %s", e)
         return response

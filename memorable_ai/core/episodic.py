@@ -41,6 +41,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from sqlalchemy import or_
+
+from memorable_ai.core.events import MESSAGE, event_hash, normalize_events
 from memorable_ai.core.models import Episode, SessionRecord, Turn
 from memorable_ai.core.scope import Scope
 from memorable_ai.core.storage import episode_search_text
@@ -180,6 +183,7 @@ class EpisodicMemory:
         knowledge_graph: Any = None,
         turn_embedder: Any = None,
         segment_embedder: Any = None,
+        capture: Any = None,
     ):
         from memorable_ai.core.embeddings import as_embedder
 
@@ -205,6 +209,10 @@ class EpisodicMemory:
             turn_context_weight=getattr(cfg, "turn_context_weight", 0.5),
         )
         self.knowledge_graph = knowledge_graph
+        # Procedural P1: tool calls / results are stored as L0 events (redacted, size-capped).
+        self.capture_tool_events = bool(getattr(capture, "tool_events", True))
+        self.pii_redaction = getattr(capture, "pii_redaction", "off") or "off"
+        self.max_payload_bytes = int(getattr(capture, "max_payload_bytes", 256 * 1024))
 
     # ------------------------------------------------------------------ ingest
 
@@ -233,16 +241,32 @@ class EpisodicMemory:
         messages: Sequence[Any],
         response_text: Optional[str] = None,
         occurred_at: Optional[datetime] = None,
+        response_events: Optional[Sequence[Any]] = None,
     ) -> IngestResult:
-        """Append unseen turns for ``scope.session_id`` and update segmentation."""
+        """
+        Append unseen events for ``scope.session_id`` and update segmentation.
+
+        Messages and tool events (calls, results) share the session's ``seq``, so a trace
+        stays in order. Only messages are embedded, indexed for excerpt retrieval and used
+        for episode boundaries; tool events are stored with their redacted payloads for
+        tasks and procedures (docs/procedural_memory_design.md §4.1).
+        """
         if not scope.session_id:
             raise ValueError("EpisodicMemory.ingest requires scope.session_id")
-        incoming = normalize_messages(messages)
-        if response_text and response_text.strip():
-            incoming.append({"role": "assistant", "content": response_text.strip()})
+        opts = dict(pii=self.pii_redaction, max_payload_bytes=self.max_payload_bytes,
+                    tool_events=self.capture_tool_events)
+        incoming = normalize_events(messages, **opts)
+        if response_events:
+            incoming.extend(normalize_events(response_events, **opts))
+        elif response_text and response_text.strip():
+            incoming.append({"role": "assistant", "content": response_text.strip(), "kind": MESSAGE,
+                             "source": "assistant"})
         if not incoming:
             return IngestResult()
-        hashes = [turn_hash(t["role"], t["content"]) for t in incoming]
+        for t in incoming:
+            if "timestamp" in t:
+                t["occurred_at"] = _parse_time(t.pop("timestamp"))
+        hashes = [event_hash(t) for t in incoming]
         start = new_suffix_start(self.stored_hashes(scope), hashes)
         new = incoming[start:]
         if not new:
@@ -253,18 +277,22 @@ class EpisodicMemory:
             if t["occurred_at"] is None:
                 t["occurred_at"] = now
 
-        vecs: Optional[np.ndarray] = None
-        seg_vecs: Optional[np.ndarray] = None
-        if self.turn_embedder is not None:
+        msg_idx = [i for i, t in enumerate(new) if t.get("kind", MESSAGE) == MESSAGE]
+        msg_texts = [new[i]["content"][:2000] for i in msg_idx]
+        vec_of: Dict[int, np.ndarray] = {}
+        seg_of: Dict[int, np.ndarray] = {}
+        if self.turn_embedder is not None and msg_texts:
             try:
-                vecs = self.turn_embedder.encode([t["content"][:2000] for t in new])
+                vecs = self.turn_embedder.encode(msg_texts)
+                vec_of = {i: vecs[j] for j, i in enumerate(msg_idx)}
             except Exception as e:
                 logger.debug("Turn embedding failed: %s", e)
         if self.segment_embedder is self.turn_embedder:
-            seg_vecs = vecs
-        elif self.segment_embedder is not None:
+            seg_of = vec_of
+        elif self.segment_embedder is not None and msg_texts:
             try:
-                seg_vecs = self.segment_embedder.encode([t["content"][:2000] for t in new])
+                svecs = self.segment_embedder.encode(msg_texts)
+                seg_of = {i: svecs[j] for j, i in enumerate(msg_idx)}
             except Exception as e:
                 logger.debug("Segmentation embedding failed: %s", e)
 
@@ -299,7 +327,8 @@ class EpisodicMemory:
             if last is not None and last.embedding and self.cfg.turn_context_weight > 0:
                 prev_vec = np.asarray(last.embedding, dtype=np.float32)
             for i, t in enumerate(new):
-                vec = vecs[i] if vecs is not None else None
+                is_msg = t.get("kind", MESSAGE) == MESSAGE
+                vec = vec_of.get(i)
                 index_vec = vec
                 w = self.cfg.turn_context_weight
                 if vec is not None and w > 0 and prev_vec is not None and prev_vec.size == vec.size:
@@ -307,9 +336,10 @@ class EpisodicMemory:
                     # "Yes, last Tuesday!" stay findable by what they answer.
                     blended = vec + w * prev_vec
                     index_vec = blended / (np.linalg.norm(blended) or 1.0)
-                prev_vec = vec
-                seg_vec = seg_vecs[i] if seg_vecs is not None else None
-                reason = self._boundary(ep, t, seg_vec) if ep is not None else None
+                if is_msg:
+                    prev_vec = vec
+                seg_vec = seg_of.get(i)
+                reason = self._boundary(ep, t, seg_vec) if (ep is not None and is_msg) else None
                 if ep is None or reason:
                     prev_ep = ep
                     if ep is not None:
@@ -343,22 +373,32 @@ class EpisodicMemory:
                     seq=seq,
                     role=t["role"],
                     content=t["content"],
-                    content_hash=turn_hash(t["role"], t["content"]),
+                    content_hash=event_hash(t),
                     episode_id=ep.id,
                     occurred_at=t["occurred_at"],
                     created_at=utcnow(),
-                    embedding=index_vec.tolist() if (index_vec is not None and self.cfg.index_turns) else None,
+                    embedding=index_vec.tolist() if (is_msg and index_vec is not None and self.cfg.index_turns)
+                    else None,
+                    kind=t.get("kind", MESSAGE),
+                    tool_name=t.get("tool_name"),
+                    tool_call_id=t.get("tool_call_id"),
+                    payload=t.get("payload"),
+                    salient_values=t.get("values") or None,
+                    is_error=bool(t.get("is_error")),
+                    source=t.get("source") or t["role"],
+                    trust_tier=t.get("trust_tier"),
                 )
                 session.add(row)
                 session.flush()
                 edges.append(self.storage._edge_dict("turn", row.id, "part_of", "episode", ep.id, **edge_attrs))
-                if self.cfg.index_turns:
-                    self.storage.fts_insert(session, "turn", row.id, row.content)
-                self._update_stats(ep, t, seg_vec)
+                if is_msg:
+                    if self.cfg.index_turns:
+                        self.storage.fts_insert(session, "turn", row.id, row.content)
+                    self._update_stats(ep, t, seg_vec)
+                    ep.turn_count = (ep.turn_count or 0) + 1  # tool bursts don't count toward max_turns
                 ep.end_seq = seq
                 ep.end_time = t["occurred_at"]
-                ep.turn_count = (ep.turn_count or 0) + 1
-                added.append((row, index_vec))
+                added.append((row, index_vec if is_msg else None))
                 seq += 1
             result.open_episode_id = ep.id if ep is not None else None
             rec.last_active_at = new[-1]["occurred_at"]
@@ -374,7 +414,8 @@ class EpisodicMemory:
             session.close()
 
         for row, vec in added:
-            if self.cfg.index_turns:
+            is_msg = (row.kind or MESSAGE) == MESSAGE
+            if self.cfg.index_turns and is_msg:
                 self.storage.index_add("turn", row.id, row.user_id, row.content, vec)
             result.new_turns.append(
                 {
@@ -384,6 +425,10 @@ class EpisodicMemory:
                     "occurred_at": row.occurred_at,
                     "episode_id": row.episode_id,
                     "seq": row.seq,
+                    "kind": row.kind or MESSAGE,
+                    "tool_name": row.tool_name,
+                    "tool_call_id": row.tool_call_id,
+                    "is_error": bool(row.is_error),
                 }
             )
         return result
@@ -454,7 +499,12 @@ class EpisodicMemory:
             ep = session.query(Episode).filter(Episode.id == episode_id).first()
             if ep is None or ep.status == "closed":
                 return None
-            turns = session.query(Turn).filter(Turn.episode_id == episode_id).order_by(Turn.seq).all()
+            turns = (
+                session.query(Turn)
+                .filter(Turn.episode_id == episode_id, or_(Turn.kind.is_(None), Turn.kind == MESSAGE))
+                .order_by(Turn.seq)
+                .all()
+            )
             turn_dicts = [
                 {"role": t.role, "content": t.content, "occurred_at": t.occurred_at, "id": t.id}
                 for t in turns
@@ -588,7 +638,7 @@ class EpisodicMemory:
     def recent_turns(self, scope: Scope, limit: int = 8, before_seq: Optional[int] = None) -> List[Dict[str, Any]]:
         session = self.storage.get_session()
         try:
-            q = self._session_query(session, Turn, scope)
+            q = self._session_query(session, Turn, scope).filter(or_(Turn.kind.is_(None), Turn.kind == MESSAGE))
             if before_seq is not None:
                 q = q.filter(Turn.seq < before_seq)
             rows = q.order_by(Turn.seq.desc()).limit(limit).all()

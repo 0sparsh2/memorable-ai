@@ -101,6 +101,19 @@ class RetrievalConfig(BaseModel):
     )
 
 
+class CaptureConfig(BaseModel):
+    """What L0 keeps from agent traffic (docs/procedural_memory_design.md §5, decision D3)."""
+
+    tool_events: bool = Field(default=True, description="Store tool calls and tool results as L0 events")
+    pii_redaction: str = Field(
+        default="off", description="PII redaction for stored messages and payloads: off | emails_phones | strict "
+        "(secrets are always redacted)",
+    )
+    max_payload_bytes: int = Field(
+        default=256 * 1024, description="Per-payload cap; above it, keep head + tail + sha256 + length",
+    )
+
+
 class EpisodicConfig(BaseModel):
     """Episode segmentation (event-segmentation style boundaries)."""
 
@@ -149,6 +162,7 @@ class MemoryConfig(BaseModel):
         default=False, description="Enable predictive memory prefetch"
     )
     episodic: EpisodicConfig = Field(default_factory=EpisodicConfig)
+    capture: CaptureConfig = Field(default_factory=CaptureConfig)
     write_mode: str = Field(
         default="background",
         description="'background' (writes run on a worker thread, off the request path) or 'sync'",

@@ -216,6 +216,26 @@ class Storage:
                 except Exception as e:
                     conn.rollback()
                     logger.debug("Migration skip edges.seq: %s", e)
+            if "turns" in tables:  # procedural P1: tool events in L0
+                turn_cols = {c["name"] for c in insp.get_columns("turns")}
+                for col, col_type in [
+                    ("kind", "VARCHAR(16)"),
+                    ("tool_name", "VARCHAR(255)"),
+                    ("tool_call_id", "VARCHAR(255)"),
+                    ("payload", json_type),
+                    ("salient_values", json_type),
+                    ("is_error", "BOOLEAN"),
+                    ("task_id", "INTEGER"),
+                    ("source", "VARCHAR(32)"),
+                    ("trust_tier", "VARCHAR(32)"),
+                ]:
+                    if col not in turn_cols:
+                        try:
+                            conn.execute(text(f"ALTER TABLE turns ADD COLUMN {col} {col_type}"))
+                            conn.commit()
+                        except Exception as e:
+                            conn.rollback()
+                            logger.debug("Migration skip turns.%s: %s", col, e)
             for table in ("turns", "episodes", "sessions", "entities"):
                 if table not in tables:
                     continue
@@ -494,6 +514,8 @@ class Storage:
             try:
                 q = session.query(model).filter(model.id > self._lex_watermark[kind])
                 q = self._valid_filter(self._ns_filter(q, model), model)
+                if model is Turn:  # tool events are not conversational excerpts
+                    q = q.filter(or_(Turn.kind.is_(None), Turn.kind == "message"))
                 max_seen = self._lex_watermark[kind]
                 for row in q.order_by(model.id).all():
                     body = episode_search_text(row) if kind == "episode" else row.content
@@ -1567,6 +1589,11 @@ class Storage:
             "content": t.content,
             "episode_id": t.episode_id,
             "occurred_at": _iso(t.occurred_at),
+            "event_kind": getattr(t, "kind", None) or "message",  # message | tool_call | tool_result
+            "tool_name": getattr(t, "tool_name", None),
+            "tool_call_id": getattr(t, "tool_call_id", None),
+            "is_error": bool(getattr(t, "is_error", False)),
+            "task_id": getattr(t, "task_id", None),
         }
 
     def get_stats(self) -> Dict[str, Any]:

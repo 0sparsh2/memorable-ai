@@ -220,6 +220,7 @@ class MemoryEngine:
                 knowledge_graph=self._knowledge_graph,
                 turn_embedder=self._turn_embedder,
                 segment_embedder=self._segment_embedder,
+                capture=cfg.memory.capture,
             )
         self._pipeline = WritePipeline(
             storage=self._storage,
@@ -437,21 +438,28 @@ class MemoryEngine:
     def _prepare_call(self, adapter: Adapter, kwargs: Dict[str, Any]) -> PreparedCall:
         return run_sync(lambda: self._aprepare_call(adapter, kwargs), timeout=30)
 
-    def _record_call(self, call: PreparedCall, text: str) -> None:
-        """Record an exchange: on the background worker, or inline in sync mode."""
-        if not call.messages and not text:
+    def _record_call(self, call: PreparedCall, text: str, events: Optional[List[Any]] = None) -> None:
+        """Record an exchange: on the background worker, or inline in sync mode.
+
+        ``events`` is the model's reply as message + tool-call events (non-streaming calls);
+        streams record their text only.
+        """
+        if not call.messages and not text and not events:
             return
-        job = lambda: self._pipeline.ingest(call.scope, call.messages, text, call.started_at)  # noqa: E731
+        job = lambda: self._pipeline.ingest(  # noqa: E731
+            call.scope, call.messages, text, call.started_at, response_events=events)
         if self._worker is not None:
             self._worker.submit(job)
         else:
             run_sync(job)
 
-    async def _arecord_call(self, call: PreparedCall, text: str) -> None:
+    async def _arecord_call(self, call: PreparedCall, text: str, events: Optional[List[Any]] = None) -> None:
+        job = lambda: self._pipeline.ingest(  # noqa: E731
+            call.scope, call.messages, text, call.started_at, response_events=events)
         if self._worker is not None:
-            self._worker.submit(lambda: self._pipeline.ingest(call.scope, call.messages, text, call.started_at))
+            self._worker.submit(job)
         else:
-            await self._pipeline.ingest(call.scope, call.messages, text, call.started_at)
+            await job()
 
     # ------------------------------------------------------------------ compatibility hooks
 
