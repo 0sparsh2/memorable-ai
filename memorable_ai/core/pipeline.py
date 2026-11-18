@@ -120,6 +120,7 @@ class WritePipeline:
                 context_turns=context,
                 session_summary=summary,
                 session_date=msg_turns[0]["occurred_at"],
+                user_name=self._user_name(scope),
             )
             user_turn_ids = [t["id"] for t in msg_turns if t["role"] == "user"]
             report.facts.extend(
@@ -192,6 +193,13 @@ class WritePipeline:
 
     # ------------------------------------------------------------------ internals
 
+    def _user_name(self, scope: Scope) -> Optional[str]:
+        kg = self.knowledge_graph
+        try:
+            return kg.user_name(scope) if kg is not None and hasattr(kg, "user_name") else None
+        except Exception:  # noqa: BLE001 - naming is a nicety; extraction must not fail on it
+            return None
+
     async def _summary(self, scope: Scope) -> str:
         if self.summary_store is None or not scope.session_id:
             return ""
@@ -219,6 +227,7 @@ class WritePipeline:
                 turns,
                 session_summary=await self._summary(scope),
                 session_date=turns[0]["occurred_at"] if turns else None,
+                user_name=self._user_name(scope),
             )
             report.facts.extend(
                 await self._apply(

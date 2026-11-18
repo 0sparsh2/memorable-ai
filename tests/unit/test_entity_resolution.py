@@ -342,3 +342,50 @@ def test_engine_merge_entities_by_name_is_scoped(engine_factory):
     alice = {(r["subject"], r["object"]) for r in eng.graph(user_id="alice")}
     mallory = {(r["subject"], r["object"]) for r in eng.graph(user_id="mallory")}
     assert ("User", "New York City") in alice and ("User", "NYC") in mallory, "only alice's graph changed"
+
+
+def test_user_name_links_mentions_to_the_user_node(storage, emb, kg):
+    kg.set_user_name(U, "Caroline")
+    assert kg.user_name(U) == "Caroline"
+    add(storage, emb, kg, "Caroline lives in Lisbon", [("Caroline", "person"), ("Lisbon", "place")],
+        [("Caroline", "lives_in", "Lisbon")])
+    add(storage, emb, kg, "User likes tea", [], [("User", "likes", "tea")])
+    rels = {(r["subject"], r["predicate"], r["object"]) for r in kg.relations(U)}
+    assert rels == {("Caroline", "lives_in", "Lisbon"), ("Caroline", "likes", "tea")}, "one node for the user"
+    assert not by_name(storage, "Caroline"), "no second entity for the user's own name"
+    other = Scope(user_id="someone-else")
+    assert kg.user_name(other) is None
+
+
+@pytest.mark.asyncio
+async def test_extraction_writes_the_users_name_when_known():
+    ext = MemoryExtractor(llm_model="stub")
+    seen = []
+
+    async def fake(prompt, max_tokens=800):
+        seen.append(prompt)
+        return []
+
+    ext._call_llm_json = fake
+    turns = [{"role": "user", "content": "I adopted a cat"}]
+    await ext._extract_llm(turns, [], "", datetime(2026, 11, 18), "Caroline")
+    await ext._extract_llm(turns, [], "", datetime(2026, 11, 18))
+    assert 'The user is Caroline: refer to them as "Caroline"' in seen[0]
+    assert 'Refer to the user as "User"' in seen[1]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_passes_the_users_name_to_extraction(engine_factory):
+    eng = engine_factory()
+    eng.set_user_name("Caroline", user_id="u1")
+    got = []
+    orig = eng._extraction.extract_from_turns
+
+    async def spy(*a, **kw):
+        got.append(kw.get("user_name"))
+        return await orig(*a, **kw)
+
+    eng._extraction.extract_from_turns = spy
+    await eng.ingest([{"role": "user", "content": "I adopted a cat named Miso"}], "Lovely!", user_id="u1", session_id="s")
+    await eng.ingest([{"role": "user", "content": "I live in Porto"}], "Nice.", user_id="u2", session_id="s2")
+    assert got == ["Caroline", None]

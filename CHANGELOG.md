@@ -67,6 +67,7 @@ Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instru
   - Ambiguous names are settled by graph context: the same relation to the same entity, any relation to the fact's other entities, or facts mentioning both. When an LLM is configured, it adjudicates only what stays ambiguous, in one small JSON call per fact (`memory.entity_resolution_llm`, on by default). Otherwise the rules fall back conservatively.
   - New `entity_aliases` table. Entities get a fact-sheet `summary` built from their valid relations (no LLM), refreshed on write and used to adjudicate.
   - `KnowledgeGraph.merge_entities` / `engine.merge_entities(duplicate, into, user_id=...)`: names become aliases, edges move (marked `extra.merged_from`) and an `alias_of` edge records the merge.
+  - `engine.set_user_name(name, user_id=...)`: the user's own name, kept on the user's graph node (as Zep keeps a user's first name). Extraction then writes "Caroline adopted a cat" instead of "User adopted a cat", and mentions of the name link to the user's node instead of a second entity.
   - `retrieval_eval.py` gains fact-level signals (`fact/graph`, `fact/pipeline`), graph size counts and per-question hit vectors for paired tests. On LoCoMo without an LLM, G1 leaves turn and episode recall unchanged and lifts graph-only fact recall@5 from 0.014 to 0.018 (+0.4 pts, 95% CI +0.1 to +0.7). Entities fall from 940 to 907.
 
 ### Changed

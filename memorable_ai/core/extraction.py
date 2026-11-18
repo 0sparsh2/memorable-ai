@@ -212,6 +212,7 @@ class MemoryExtractor:
         context_turns: Sequence[Dict[str, Any]] = (),
         session_summary: str = "",
         session_date: Optional[datetime] = None,
+        user_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Extract memories from ``turns`` (dicts with role, content and optional
@@ -230,7 +231,7 @@ class MemoryExtractor:
             llm_enabled(self.llm_model) or self.llm_client is not None
         )
         if use_llm:
-            memories.extend(await self._extract_llm(turns, context_turns, session_summary, ref_date))
+            memories.extend(await self._extract_llm(turns, context_turns, session_summary, ref_date, user_name))
         if self.extraction_mode in ("pattern", "hybrid") or (self.extraction_mode == "llm" and not memories):
             memories.extend(self._extract_patterns(turns, ref_date, skip_if_llm=bool(memories)))
 
@@ -366,6 +367,7 @@ class MemoryExtractor:
         context_turns: Sequence[Dict[str, Any]],
         session_summary: str,
         ref_date: datetime,
+        user_name: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         lines = []
         for i, t in enumerate(turns):
@@ -379,6 +381,8 @@ class MemoryExtractor:
             context="\n".join(ctx_lines) or "(none)",
             turns="\n".join(lines),
             ontology=self.ontology.prompt_block(),
+            user=(f'The user is {user_name}: refer to them as "{user_name}"' if user_name
+                  else 'Refer to the user as "User"'),
         )
         # About 150 output tokens per message: a long session's facts, with their entities and
         # relations, ran past a fixed 1,200 and were cut off mid-item (the pilot lost 9 of 38).
@@ -514,7 +518,7 @@ Return a JSON array. Each item:
 {ontology}
 
 Rules:
-- One atomic statement per item. Refer to the user as "User" and use full names for other people.
+- One atomic statement per item. {user} and use full names for other people.
 - Resolve pronouns and relative dates ("yesterday", "last week") into explicit names and calendar dates using today's date.
 - Extract what the user states about themselves, their life, people they know, plans, preferences and instructions for the assistant ("rule"). Include facts the assistant states only if the user confirmed them.
 - Skip greetings, questions, generic knowledge, and anything not useful in a future conversation.

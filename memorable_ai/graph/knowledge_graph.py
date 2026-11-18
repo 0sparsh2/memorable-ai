@@ -234,6 +234,38 @@ class KnowledgeGraph:
         else:
             self._add_alias(session, scope, ent, m.norm, how if how in ("nickname", "partial", "llm") else "surface")
 
+    def _self_aliases(self, session: Any, scope: Scope) -> Set[str]:
+        """Names the user goes by in this scope (``set_user_name``), normalised."""
+        ent = self._self_entity(session, scope, utcnow(), create=False)
+        if ent is None:
+            return set()
+        return {a for (a,) in session.query(EntityAlias.alias).filter(EntityAlias.entity_id == ent.id).all()}
+
+    def set_user_name(self, scope: Scope, name: str) -> None:
+        """
+        The user's own name (as Zep keeps a user's first name on the user node): mentions of it
+        resolve to the user's entity, and extraction writes facts with the name, not "User".
+        """
+        norm = normalize_entity(name)
+        if not norm or norm in SELF_NAMES:
+            return
+        session = self.storage.get_session()
+        try:
+            ent = self._self_entity(session, scope, utcnow())
+            ent.name = name.strip()[:255]
+            self._add_alias(session, scope, ent, norm, "user")
+            session.commit()
+        finally:
+            session.close()
+
+    def user_name(self, scope: Scope) -> Optional[str]:
+        session = self.storage.get_session()
+        try:
+            ent = self._self_entity(session, scope, utcnow(), create=False)
+            return ent.name if ent is not None and ent.name and ent.name != "User" else None
+        finally:
+            session.close()
+
     def _get_or_create_entity(
         self, session: Any, scope: Scope, name: str, entity_type: str = "concept", now: Optional[datetime] = None
     ) -> Optional[Entity]:
@@ -241,6 +273,8 @@ class KnowledgeGraph:
         norm = self._norm(name)
         if not norm:
             return None
+        if norm in self._self_aliases(session, scope):
+            norm = "user"
         now = now or utcnow()
         if norm == "user":
             ent = self._self_entity(session, scope, now)
@@ -264,7 +298,8 @@ class KnowledgeGraph:
             created_at=attrs.pop("created_at", utcnow()), **attrs,
         )
 
-    def _mentions(self, memory: Dict[str, Any]) -> Tuple[Dict[str, Mention], List[Rel], Set[str]]:
+    def _mentions(self, memory: Dict[str, Any], self_aliases: Set[str] = frozenset()) -> Tuple[
+            Dict[str, Mention], List[Rel], Set[str]]:
         """
         Entities and canonical relations of one fact:
         ({norm: Mention}, [(subject norm, predicate, object norm, edge attrs)], norms named as entities).
@@ -281,6 +316,8 @@ class KnowledgeGraph:
             norm = self._norm(name)
             if not norm:
                 return None
+            if norm in self_aliases:  # the user's own name
+                norm = "user"
             if norm != "user":
                 t = ont.entity_type(etype)
                 cur = mentions.get(norm)
@@ -337,7 +374,7 @@ class KnowledgeGraph:
         return mentions, rels, named
 
     def _resolve(self, session: Any, scope: Scope, memory: Dict[str, Any], now: datetime, create_self: bool):
-        mentions, rels, named = self._mentions(memory)
+        mentions, rels, named = self._mentions(memory, self._self_aliases(session, scope))
         needs_self = any("user" in (sn, on) for sn, _, on, _ in rels) or "user" in named
         self_ent = self._self_entity(session, scope, now, create=create_self) if needs_self or not create_self else None
         resolved: Dict[str, int] = {"user": self_ent.id} if self_ent is not None else {}

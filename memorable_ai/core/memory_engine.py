@@ -835,6 +835,15 @@ class MemoryEngine:
         scope = Scope(self.config.memory.namespace, self._canonical(user_id or current_user()))
         return self._knowledge_graph.relations(scope)
 
+    def set_user_name(self, name: str, user_id: Optional[str] = None) -> None:
+        """
+        Tell memory the user's name (as Zep stores a user's first name). Facts are then written
+        with the name instead of "User", and mentions of it link to the user's own graph node.
+        """
+        self._ensure_components()
+        scope = Scope(self.config.memory.namespace, self._canonical(user_id or current_user()))
+        self._knowledge_graph.set_user_name(scope, name)
+
     def merge_entities(self, duplicate: Any, into: Any, user_id: Optional[str] = None) -> bool:
         """
         Merge two of a user's entities (names or ids), e.g. after a wrong split: the
