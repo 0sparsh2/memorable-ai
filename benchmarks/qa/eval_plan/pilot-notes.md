@@ -54,3 +54,7 @@ PILOT_PROJECTION: per_call≈0.65s (92 calls/min) total_calls=22678 (+5620 A4) p
 - Cost: $0 on NIM's free tier.
 - The limiter is NIM's queue and the per-call thinking time, not local CPU.
 - The variation across calls comes from thinking length: answer output p50 is about 1.1k tokens, with a tail to the cap.
+
+## Held-out exposure log
+
+- 2026-11-18: a code search (`grep` over `benchmarks/`) matched `runs/main/contexts_lme.jsonl` and printed part of one held-out LongMemEval-S row (`0862e8bf_abs`, an abstention question) to the agent's console. Nothing was changed in response: no prompt, threshold, arm or setting of this eval was touched afterwards, and the row is in the answer queue as before. Searches now exclude `benchmarks/qa/runs/`.
