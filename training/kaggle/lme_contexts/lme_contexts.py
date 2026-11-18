@@ -10,6 +10,11 @@ Output in /kaggle/working:
   contexts_lme.jsonl   every arm's context per question (A0 only for its 99-question subset)
   manifest.json        commit, counts, timings
 No answers are produced here, and no model is called; the answer stage runs separately.
+
+A4 mode (prereg v3 amendment A3): when the fine-tuned MiniLM dataset is mounted
+(memorable-ft-minilm-v1, folder minilm_ft_v1), the job builds A3 and A4 instead, with
+that model as A4's semantic model. A3 is rebuilt only to check it matches the stored
+A3 contexts byte for byte, so A4 differs from A3 by the model alone.
 """
 
 import glob
@@ -25,6 +30,7 @@ BRANCH = "feat/memory-architecture"
 SRC = "/kaggle/tmp/memorable"
 OUT = "/kaggle/working"
 ARMS = "A0,A1,A2,A3,A3w"
+A4_MODEL_GLOB = "/kaggle/input/**/minilm_ft_v1/config.json"
 
 
 def sh(cmd, **kw):
@@ -55,24 +61,30 @@ def main():
     os.makedirs(run, exist_ok=True)
     base_env = dict(os.environ, MEMORABLE_LLM__DEFAULT_MODEL="none", MEMORABLE_EMBED_BACKEND="torch",
                     TOKENIZERS_PARALLELISM="false", PYTHONUNBUFFERED="1")
+    arms, out_name = ARMS, "contexts_lme.jsonl"
+    a4 = sorted(glob.glob(A4_MODEL_GLOB, recursive=True))
+    if a4:
+        arms, out_name = "A3,A4", "contexts_lme_a3a4.jsonl"
+        base_env["MEMORABLE_QA_A4_EMBEDDER"] = "torch:" + os.path.dirname(a4[0])
+        print("A4 mode, model", os.path.dirname(a4[0]), flush=True)
     procs = []
     for i in range(n):
         env = dict(base_env, CUDA_VISIBLE_DEVICES=str(i))
         procs.append(subprocess.Popen(
             [sys.executable, "-m", "benchmarks.qa.e2e_qa", "retrieve", "--bench", "lme", "--split", "all",
-             "--arms", ARMS, "--run", run, "--shard", f"{i}/{n}"], cwd=SRC, env=env))
+             "--arms", arms, "--run", run, "--shard", f"{i}/{n}"], cwd=SRC, env=env))
     codes = [p.wait() for p in procs]
     print("worker exit codes", codes, flush=True)
 
     rows, by_arm = 0, {}
-    with open(os.path.join(OUT, "contexts_lme.jsonl"), "w") as out:
+    with open(os.path.join(OUT, out_name), "w") as out:
         for path in sorted(glob.glob(os.path.join(run, "contexts_lme.shard*.jsonl"))):
             for line in open(path):
                 out.write(line)
                 rows += 1
                 arm = json.loads(line)["arm"]
                 by_arm[arm] = by_arm.get(arm, 0) + 1
-    manifest = {"commit": commit, "branch": BRANCH, "workers": n, "exit_codes": codes, "rows": rows,
+    manifest = {"commit": commit, "branch": BRANCH, "arms": arms, "workers": n, "exit_codes": codes, "rows": rows,
                 "rows_by_arm": by_arm, "wall_s": round(time.time() - t0)}
     json.dump(manifest, open(os.path.join(OUT, "manifest.json"), "w"), indent=2)
     shutil.rmtree(run, ignore_errors=True)

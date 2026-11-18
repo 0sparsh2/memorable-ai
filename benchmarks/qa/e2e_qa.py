@@ -76,8 +76,22 @@ ARMS: Dict[str, Dict[str, Any]] = {
            "k_episodes": 3},
     "A3w": {"fusion": "score", "rerank": True, "rerank_model": ETTIN17, "rerank_depth": 20, "k_excerpts": 40,
             "k_episodes": 3},
-    # A4 (fine-tuned) is added after the retrieval bars are read, before the pilot (prereg).
+    # A4 (prereg v3 amendment A3): A3 with every fine-tuned model that passed its retrieval bar, which
+    # after round 2 is only round 1's MiniLM, as the semantic model. It changes ingestion (episode and
+    # fact vectors), so A4 gets its own ingest. The model path comes from MEMORABLE_QA_A4_EMBEDDER.
+    "A4": {"fusion": "score", "rerank": True, "rerank_model": ETTIN17, "rerank_depth": 20, "k_excerpts": 10,
+           "k_episodes": 3, "embedding_model": "env:MEMORABLE_QA_A4_EMBEDDER"},
 }
+
+
+def _arm_embedder(arm: str) -> Optional[str]:
+    spec = ARMS[arm].get("embedding_model")
+    if spec and spec.startswith("env:"):
+        value = os.environ.get(spec[4:])
+        if not value:
+            raise SystemExit(f"arm {arm} needs {spec[4:]} (the fine-tuned model's path)")
+        return value
+    return spec
 
 
 # ------------------------------------------------------------------ data
@@ -193,10 +207,12 @@ def memory_context(item: Dict[str, Any], turns: List[Dict[str, Any]], episodes: 
     return "\n".join(r[2] for r in rows) or "(no memories found)", cut
 
 
-async def _ingest(item: Dict[str, Any], db: Path):
+async def _ingest(item: Dict[str, Any], db: Path, embedding_model: Optional[str] = None):
     from memorable_ai import MemoryEngine
 
     eng = MemoryEngine(database=f"sqlite:///{db}", write_mode="sync")
+    if embedding_model:  # the semantic model only; the turn and segmentation models are unchanged
+        eng.config.llm.embedding_model = embedding_model
     eng._ensure_components()
     uid = item["group"]
     if item["bench"] == "locomo":
@@ -220,8 +236,6 @@ async def _ingest(item: Dict[str, Any], db: Path):
 
 
 async def _contexts_for_group(group_items, arms, tmp: Path, out) -> Dict[str, Any]:
-    from memorable_ai.core.scope import Scope
-
     stats = {"ingest_s": 0.0, "truncated_turns": 0, "empty": defaultdict(int)}
     mem_arms = [a for a in arms if not ARMS[a].get("full_context")]
     for a in arms:
@@ -232,15 +246,27 @@ async def _contexts_for_group(group_items, arms, tmp: Path, out) -> Dict[str, An
                     out.write(json.dumps({"arm": a, **_public(it), "context": ctx, "retrieval_ms": 0.0}) + "\n")
     if not mem_arms:
         return stats
+    by_embedder: Dict[Optional[str], List[str]] = defaultdict(list)  # arms sharing an ingest
+    for a in mem_arms:
+        by_embedder[_arm_embedder(a)].append(a)
+    for n_ingest, (embedder, arm_list) in enumerate(by_embedder.items()):
+        await _arm_contexts(group_items, embedder, arm_list, tmp / f"i{n_ingest}", stats, out)
+    return stats
+
+
+async def _arm_contexts(group_items, embedder, arm_list, tmp: Path, stats, out) -> None:
+    from memorable_ai.core.scope import Scope
+
+    tmp.mkdir(parents=True, exist_ok=True)
     db = tmp / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', group_items[0]['group'])}.db"
     t0 = time.perf_counter()
-    eng = await _ingest(group_items[0], db)
+    eng = await _ingest(group_items[0], db, embedder)
     stats["ingest_s"] += time.perf_counter() - t0
     r = eng._retrieval
     base = {k: getattr(r, k) for k in ("fusion", "semantic_weight", "bm25_weight", "rerank", "rerank_model",
                                        "rerank_depth", "rerank_blend")}
     try:
-        for a in mem_arms:
+        for a in arm_list:
             cfg = ARMS[a]
             for k, v in base.items():
                 setattr(r, k, cfg.get(k, v))
@@ -266,7 +292,6 @@ async def _contexts_for_group(group_items, arms, tmp: Path, out) -> Dict[str, An
         eng.close()
         for p in tmp.glob(db.name + "*"):
             p.unlink(missing_ok=True)
-    return stats
 
 
 def _public(it: Dict[str, Any]) -> Dict[str, Any]:

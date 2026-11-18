@@ -7,6 +7,11 @@
 
 **Amendment A2 (2026-11-16): A4.** By the preregistered rule ([docs/retrieval_round2.md](../../../docs/retrieval_round2.md) §4), fine-tuning round 1 qualified only the semantic model (MiniLM-ft: episode recall +1.3 pts end to end). The turn model, static model and rerankers did not pass. A4 is built after fine-tuning round 2, which re-tests every model under the same bars, so that one A4 arm carries every qualifying model. The A0–A3w answers already running are unaffected.
 
+**Amendment A3 (2026-11-18): the A4 arm, fixed before any A4 answer.** Round 2 ([docs/retrieval_round2.md](../../../docs/retrieval_round2.md) §5) qualified no further model, and round 2's own MiniLM missed its bar (+0.98 vs ≥ +1.0). A4 is therefore:
+- **A3 with round 1's fine-tuned MiniLM as the semantic model** (`training/data/ft_v1/models/minilm`, `model.safetensors` sha256 `41f5364bde780ef4…`). Turn model (leaf-ir), segmentation model (potion-32M), reranker (Ettin-17M base), fusion, k and the prompt are A3's.
+- The semantic model shapes ingestion: episode and fact vectors, and the sentences picked for extractive episode summaries. So A4 has its own ingest. A3 is rebuilt in the same process and must match the stored A3 contexts byte for byte, so A4 differs from A3 by the model alone. LoCoMo is built locally; LongMemEval-S on Kaggle (the same job as A3's, in A4 mode).
+- **Pilot:** 3 items per benchmark (LME dev rows; LoCoMo has no split), in a separate run directory so pilot answers never enter the results, before A4's contexts join the chunked loop. The stop rules, bars (B4: A4 − A3) and judges are unchanged.
+
 **Changes from v2**, from pilot attempt 2 ([pilot-notes.md](pilot-notes.md)):
 1. **Empty-answer fallback.** If a thinking answer comes back empty (thinking ran to the 8,192-token cap), the same prompt is asked once more without thinking. This applies to every arm, and fallbacks are counted per arm. Attempt 2 had 1 empty answer in 30: the full-context arm on a 108k-token LME history. Without the fallback that would count against the ceiling arm, which flatters the memory arms.
 2. **No change to B6:** the decoy check now computes the bar as written (≥95% of all decoys WRONG, ≥95% of gold CORRECT, per benchmark and judge). Earlier code demanded ≥95% for each decoy type separately, which with 10 decoys per type meant 10/10.
