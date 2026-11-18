@@ -16,3 +16,23 @@ Real extraction with `nvidia/nemotron-3.5-bolt-e4b`, conv-26 and conv-30 in para
 - A5 without its facts reproduces the stored A3 contexts: 75/75. Every A5 context carries 20 facts (about 6,000 characters of memory, vs about 3,250 for A3).
 - **Hand check of 20 random facts:** 1 misstates its source (it merges two different hike incidents from sessions 12 and 14), under the limit of 2. Dates are resolved correctly ("ten years ago" → 2013, "last Friday" → 2023-06-23).
 - **Finding:** 7 of the 20 say "User" for the speaker the harness feeds in as the user (Caroline, Jon), while LoCoMo's questions name them. Fixed by naming the user ([prereg-v4.2.md](prereg-v4.2.md)); no answers had been produced.
+
+## Attempt 3 (prereg v4.2), 2026-11-18: pass
+**Extraction** (LoCoMo conv-26 and conv-30, Bolt, 6 requests/min offered, 2 conversations in parallel):
+- 74 calls in 12.6 min, about 5.9 calls/min with no 429s: 0 transport failures after retries, 0 unparseable replies, 0 repaired, 0 thinking text.
+- Facts kept: 69 and 63. 4 of 38 sessions yielded none (10.5%, under 20%).
+- No fact says "User" (attempt 2: 7 of 20 sampled); 50 of 69 and 53 of 63 name the speaker. The user's own graph node carries the name, and no second entity was created for it.
+- A5 without its facts reproduces the stored A3 contexts: 75/75. D5 rows carry the other conversation's 20 facts.
+- Hand check of 20 new random facts: at most 2 slightly off (a tense, "is attending" a conference held two days earlier; one unverified detail), under the limit of 2. The update phase sometimes merges statements into long compound facts; two of the 20 repeat the same opening sentence.
+
+**Answers** (3 per arm, this pilot directory only, never part of the results): 9 answered in 210 s. Input tokens: A5 1.7–2.0k, A6 4.4–4.9k, D5 1.9–2.0k (A3: about 1.0k). One A6 answer used the no-thinking fallback (v3 rule). Correctness on 3 items is not a result.
+
+**Projection**
+```
+PILOT_ARM: extraction unit=nim_calls(bolt) per_conversation=37 (19 sessions) rate=5.9/min measured n=74
+PILOT_ARM: answers    unit=nim_calls(lightning) per_item=1 answer + 1-2 judges; main loop pace 2,614 calls/24 h, 940/6 h
+PILOT_PROJECTION: extraction LoCoMo ~530 calls ~1.5 h; LME 99 haystacks ~9.9k calls ~28 h band95=23..55 h cap=7 d verdict=within
+PILOT_PROJECTION: answers+judges ~3.3k calls (A5 1.7k, A6 1.2k, D5 0.2k, drift check 0.2k) +1.1 d to the shared queue band95=0.9..2.2 d cap=21 d verdict=within
+```
+- Cost: $0 on NIM's free tier.
+- Limiters: Bolt's per-model throttle for extraction; Lightning's for answers, shared with v3's loop (v3 has about 7.5 days of calls left at the current pace, including A4).
