@@ -58,3 +58,8 @@ PILOT_PROJECTION: per_call≈0.65s (92 calls/min) total_calls=22678 (+5620 A4) p
 ## Held-out exposure log
 
 - 2026-11-18: a code search (`grep` over `benchmarks/`) matched `runs/main/contexts_lme.jsonl` and printed part of one held-out LongMemEval-S row (`0862e8bf_abs`, an abstention question) to the agent's console. Nothing was changed in response: no prompt, threshold, arm or setting of this eval was touched afterwards, and the row is in the answer queue as before. Searches now exclude `benchmarks/qa/runs/`.
+
+## A4 (amendment A3), 2026-11-18
+- **Contexts.** LoCoMo built locally, LongMemEval-S on Kaggle (A4 mode; a first launch missed the mounted model and rebuilt v3's arms instead, which led to the job now refusing to run when an input is mounted but not found). In both, A3 rebuilt in the same process matches the stored A3 contexts byte for byte: LoCoMo 1,540/1,540, LongMemEval 500/500. So A4 differs from A3 by the fine-tuned model alone. A4 contexts: none empty; 1,540/1,540 (LoCoMo) and 441/500 (LME) differ from A3.
+- **Pilot** (3 items per benchmark, separate run directories): LoCoMo 3/3 answered, no fallback, about 920–1,080 input tokens; LME 3 dev items answered, no fallback, about 3,900–4,500 input tokens. Correctness on 3 items is not a result.
+- **Published** to the answer loop as `contexts_locomo_a4.jsonl` (1,540 rows) and `contexts_lme_a4.jsonl` (500 rows).
