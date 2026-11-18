@@ -36,3 +36,8 @@ PILOT_PROJECTION: answers+judges ~3.3k calls (A5 1.7k, A6 1.2k, D5 0.2k, drift c
 ```
 - Cost: $0 on NIM's free tier.
 - Limiters: Bolt's per-model throttle for extraction; Lightning's for answers, shared with v3's loop (v3 has about 7.5 days of calls left at the current pace, including A4).
+
+## Full run (approved by the owner, 2026-11-18)
+**LoCoMo, built and published.** Extraction over all 10 conversations in 90 min: 531 calls for 272 sessions (1.95 per session; bar B9 ≤ 2.5), 4 unparseable replies (1.5%), 3 repaired (1.1%), no thinking text or empty replies. A5 without its facts equals the stored A3 context for all 500 subset questions. Published to the loop as `contexts_locomo_v4.jsonl`: A5 500, A6 500, D5 100, A3r 40.
+
+**LongMemEval-S, running.** The 99 held-out haystacks, about 28 h of extraction. Built on the PyTorch backend: on 3 dev haystacks both PyTorch and ONNX locally reproduce the Kaggle-built A3 contexts byte for byte; the publish step re-checks all 99.
