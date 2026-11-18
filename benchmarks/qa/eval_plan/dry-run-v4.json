@@ -1,0 +1,16 @@
+{
+  "date": "2026-11-18",
+  "stub": "canned extraction and update replies in place of the LLM; LoCoMo conv-26 and conv-30",
+  "checks": {
+    "price-table": "ok: every arm $0 on NIM; ingest calls counted per conversation",
+    "input-shapes": "ok: A5 contexts carry dated [fact] lines; A6 80 turns; D5 facts from the next conversation",
+    "length-budget": "ok: A6 about 16.5k characters (~4.1k tokens) of memory, far under the answer model's context",
+    "reservation-fits-cap": "ok: the largest unit is one LongMemEval haystack's extraction (~100 calls)",
+    "memory": "ok: peak RSS 832 MB with two conversations in parallel",
+    "llm-calls": "37 per LoCoMo conversation of 19 sessions (19 extraction + 18 update), as projected; 0 on a rerun (cache)",
+    "a5-minus-facts-equals-a3": "ok: 75/75 contexts byte-identical to the stored A3 contexts",
+    "resume": "ok: a rerun writes no duplicate rows; the answer stage also answers a duplicated row once",
+    "scorer-on-decoys": "v3's judge decoys (B6) apply unchanged; D5 is an arm-level decoy read at the end"
+  },
+  "result": "DRY_RUN_RESULT: pass"
+}

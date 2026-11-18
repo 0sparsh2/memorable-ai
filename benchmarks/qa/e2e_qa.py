@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextvars
 import json
 import os
 import random
@@ -33,7 +34,7 @@ import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -82,6 +83,34 @@ ARMS: Dict[str, Dict[str, Any]] = {
     "A4": {"fusion": "score", "rerank": True, "rerank_model": ETTIN17, "rerank_depth": 20, "k_excerpts": 10,
            "k_episodes": 3, "embedding_model": "env:MEMORABLE_QA_A4_EMBEDDER"},
 }
+
+# prereg v4 (LLM facts and a wider window). Subsets are fixed by seed before any answer.
+EXTRACT_MODEL = "nvidia_nim/nvidia/nemotron-3.5-bolt-e4b"  # A5's extraction model (own per-model quota)
+V4_SEED = 20261118
+ARMS["A5"] = dict(ARMS["A3"], k_facts=20, ingest="llm", subset="v4")
+ARMS["A5x"] = dict(ARMS["A3"], k_facts=0, ingest="llm", subset="v4", check_only=True)  # must equal A3
+ARMS["A6"] = dict(ARMS["A3"], k_excerpts=80, subset="v4")
+ARMS["D5"] = dict(ARMS["A5"], facts_from="other", subset="v4d")  # decoy: another conversation's facts
+LENIENT_ARMS.add("A5")
+_GROUP_ORDER: Dict[str, List[str]] = {}  # bench -> group ids, for D5's fixed derangement
+_RUN_DIR: List[Path] = []
+
+
+def v4_subsets(bench: str, items: List[Dict[str, Any]]) -> Dict[str, set]:
+    """prereg v4: LoCoMo 500 stratified by category (+100 of them for D5); LME = A0's held-out subset."""
+    if bench == "lme":
+        return {"v4": a0_lme_subset(lme_items("all")), "v4d": set()}
+    rng = random.Random(V4_SEED)
+    by = defaultdict(list)
+    for it in items:
+        by[it["category"]].append(it["qid"])
+    total = sum(len(v) for v in by.values())
+    picked = set()
+    for _, ids in sorted(by.items()):
+        ids = sorted(ids)
+        rng.shuffle(ids)
+        picked.update(ids[: round(500 * len(ids) / total)])
+    return {"v4": picked, "v4d": set(rng.sample(sorted(picked), 100))}
 
 
 def _arm_embedder(arm: str) -> Optional[str]:
@@ -188,9 +217,21 @@ def full_context(item: Dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
-def memory_context(item: Dict[str, Any], turns: List[Dict[str, Any]], episodes: List[Dict[str, Any]]) -> tuple:
+def _fact_date(f: Dict[str, Any]) -> Optional[datetime]:
+    ev = (f.get("metadata") or {}).get("event_date")
+    try:
+        return datetime.strptime(str(ev)[:10], "%Y-%m-%d") if ev else _parse_iso(f.get("valid_from"))
+    except ValueError:
+        return _parse_iso(f.get("valid_from"))
+
+
+def memory_context(item: Dict[str, Any], turns: List[Dict[str, Any]], episodes: List[Dict[str, Any]],
+                   facts: Sequence[Dict[str, Any]] = ()) -> tuple:
     """Oldest first, dated, no ranks or scores (as Mem0 presents memories)."""
     rows, cut = [], 0
+    for f in facts:  # prereg v4 A5: LLM-extracted facts, dated by event or by when they were said
+        dt = _fact_date(f)
+        rows.append((dt or datetime.min, -2, _line(dt, f"[fact] {f.get('content') or ''}")))
     for e in episodes:
         dt = _parse_iso(e.get("start_time"))
         rows.append((dt or datetime.min, -1, _line(dt, f"[summary of a past conversation] {e.get('title') or ''}: "
@@ -207,13 +248,23 @@ def memory_context(item: Dict[str, Any], turns: List[Dict[str, Any]], episodes: 
     return "\n".join(r[2] for r in rows) or "(no memories found)", cut
 
 
-async def _ingest(item: Dict[str, Any], db: Path, embedding_model: Optional[str] = None):
+def _engine(db: Path, embedding_model: Optional[str] = None, llm: bool = False):
     from memorable_ai import MemoryEngine
 
     eng = MemoryEngine(database=f"sqlite:///{db}", write_mode="sync")
     if embedding_model:  # the semantic model only; the turn and segmentation models are unchanged
         eng.config.llm.embedding_model = embedding_model
+    if llm:  # prereg v4 A5: extraction, update and entity resolution on the LLM
+        eng.config.llm.default_model = EXTRACT_MODEL
     eng._ensure_components()
+    if llm:  # episode and session summaries stay extractive, as in A3, so A5 - A3 is the facts alone
+        eng._episodic.llm_model = None
+        eng._summary_store.llm_model = None
+    return eng
+
+
+async def _ingest(item: Dict[str, Any], db: Path, embedding_model: Optional[str] = None, llm: bool = False):
+    eng = _engine(db, embedding_model, llm)
     uid = item["group"]
     if item["bench"] == "locomo":
         from benchmarks.locomo.loader import format_turn_text
@@ -235,36 +286,83 @@ async def _ingest(item: Dict[str, Any], db: Path, embedding_model: Optional[str]
     return eng
 
 
+def _safe(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", name)
+
+
+def _in_subset(arm: str, it: Dict[str, Any]) -> bool:
+    sub = ARMS[arm].get("subset")
+    return not sub or sub in it.get("_subsets", ())
+
+
+def _ingest_key(arm: str):
+    return _arm_embedder(arm), ARMS[arm].get("ingest", "plain")
+
+
 async def _contexts_for_group(group_items, arms, tmp: Path, out) -> Dict[str, Any]:
     stats = {"ingest_s": 0.0, "truncated_turns": 0, "empty": defaultdict(int)}
     mem_arms = [a for a in arms if not ARMS[a].get("full_context")]
     for a in arms:
         if ARMS[a].get("full_context"):
             for it in group_items:
-                if it.get("_a0", True):
+                if it.get("_a0", True) and (a, it["qid"]) not in _WRITTEN:
+                    _WRITTEN.add((a, it["qid"]))
                     ctx = full_context(it)
                     out.write(json.dumps({"arm": a, **_public(it), "context": ctx, "retrieval_ms": 0.0}) + "\n")
-    if not mem_arms:
-        return stats
-    by_embedder: Dict[Optional[str], List[str]] = defaultdict(list)  # arms sharing an ingest
+    by_ingest: Dict[Any, List[str]] = defaultdict(list)  # arms sharing an ingest
     for a in mem_arms:
-        by_embedder[_arm_embedder(a)].append(a)
-    for n_ingest, (embedder, arm_list) in enumerate(by_embedder.items()):
-        await _arm_contexts(group_items, embedder, arm_list, tmp / f"i{n_ingest}", stats, out)
+        if any(_in_subset(a, it) for it in group_items):
+            by_ingest[_ingest_key(a)].append(a)
+    for n_ingest, ((embedder, mode), arm_list) in enumerate(by_ingest.items()):
+        await _arm_contexts(group_items, embedder, mode, arm_list, tmp / f"i{n_ingest}", stats, out)
     return stats
 
 
-async def _arm_contexts(group_items, embedder, arm_list, tmp: Path, stats, out) -> None:
+async def _cached_engine(bench: str, group: str, item: Optional[Dict[str, Any]], embedder, stats=None):
+    """
+    LLM ingests are kept under <run>/ingest_cache so a multi-day extraction resumes after a
+    crash and every arm (and the decoy) reads the same facts. A ``.done`` marker means complete.
+    """
+    cache = _RUN_DIR[0] / "ingest_cache" / bench
+    cache.mkdir(parents=True, exist_ok=True)
+    db = cache / f"{_safe(group)}.llm.db"
+    done = db.with_suffix(".done")
+    if done.exists():
+        return _engine(db, embedder, llm=True)
+    if item is None:
+        raise SystemExit(f"no finished LLM ingest for {group}; run A5 before D5")
+    for p in cache.glob(db.name + "*"):
+        p.unlink()
+    token = _LLM_GROUP.set(group)
+    t0 = time.perf_counter()
+    try:
+        eng = await _ingest(item, db, embedder, llm=True)
+    finally:
+        _LLM_GROUP.reset(token)
+    if stats is not None:
+        stats["ingest_s"] += time.perf_counter() - t0
+    calls = _LLM_STATS.get(group, {})
+    done.write_text(json.dumps({"ingest_s": round(time.perf_counter() - t0, 1), "facts":
+                                eng.get_stats().get("active_memories"), "llm": calls}))
+    return eng
+
+
+async def _arm_contexts(group_items, embedder, mode, arm_list, tmp: Path, stats, out) -> None:
     from memorable_ai.core.scope import Scope
 
+    bench, group = group_items[0]["bench"], group_items[0]["group"]
     tmp.mkdir(parents=True, exist_ok=True)
-    db = tmp / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', group_items[0]['group'])}.db"
+    db = tmp / f"{_safe(group)}.db"
     t0 = time.perf_counter()
-    eng = await _ingest(group_items[0], db, embedder)
-    stats["ingest_s"] += time.perf_counter() - t0
+    if mode == "llm":
+        eng = await _cached_engine(bench, group, group_items[0], embedder, stats)
+    else:
+        eng = await _ingest(group_items[0], db, embedder)
+        stats["ingest_s"] += time.perf_counter() - t0
     r = eng._retrieval
     base = {k: getattr(r, k) for k in ("fusion", "semantic_weight", "bm25_weight", "rerank", "rerank_model",
                                        "rerank_depth", "rerank_blend")}
+    others = []
     try:
         for a in arm_list:
             cfg = ARMS[a]
@@ -277,21 +375,95 @@ async def _arm_contexts(group_items, embedder, arm_list, tmp: Path, stats, out) 
 
                     _RERANKERS[spec] = load_reranker(spec)
                 r._reranker = _RERANKERS[spec]
+            fact_eng, fact_group = None, group
+            if cfg.get("facts_from") == "other":  # D5: the next conversation's facts (fixed derangement)
+                order = _GROUP_ORDER[bench]
+                fact_group = order[(order.index(group) + 1) % len(order)]
+                fact_eng = await _cached_engine(bench, fact_group, None, embedder)
+                others.append(fact_eng)
+                fr = fact_eng._retrieval
+                for k, v in base.items():
+                    setattr(fr, k, cfg.get(k, v))
+                fr._reranker = r._reranker
+            sink = _CHECK_OUT[0] if cfg.get("check_only") else out
             for it in group_items:
+                if not _in_subset(a, it) or (a, it["qid"]) in _WRITTEN:
+                    continue
+                _WRITTEN.add((a, it["qid"]))
                 t = time.perf_counter()
-                res = await r.recall(it["question"], Scope(user_id=it["group"]), k_facts=0,
+                k_facts = cfg.get("k_facts", 0)
+                res = await r.recall(it["question"], Scope(user_id=group), k_facts=0 if fact_eng else k_facts,
                                      k_episodes=cfg["k_episodes"], k_excerpts=cfg["k_excerpts"])
+                facts = res.get("facts") or []
+                if fact_eng is not None:
+                    facts = (await fact_eng._retrieval.recall(it["question"], Scope(user_id=fact_group),
+                                                              k_facts=k_facts, k_episodes=0, k_excerpts=0))["facts"]
                 ms = 1000 * (time.perf_counter() - t)
-                ctx, cut = memory_context(it, res["excerpts"], res["episodes"])
+                ctx, cut = memory_context(it, res["excerpts"], res["episodes"], facts)
                 stats["truncated_turns"] += cut
-                if not res["excerpts"] and not res["episodes"]:
+                if not res["excerpts"] and not res["episodes"] and not facts:
                     stats["empty"][a] += 1
-                out.write(json.dumps({"arm": a, **_public(it), "context": ctx, "retrieval_ms": round(ms, 1),
-                                      "n_turns": len(res["excerpts"]), "n_episodes": len(res["episodes"])}) + "\n")
+                sink.write(json.dumps({"arm": a, **_public(it), "context": ctx, "retrieval_ms": round(ms, 1),
+                                       "n_turns": len(res["excerpts"]), "n_episodes": len(res["episodes"]),
+                                       "n_facts": len(facts)}) + "\n")
     finally:
         eng.close()
+        for o in others:
+            o.close()
         for p in tmp.glob(db.name + "*"):
             p.unlink(missing_ok=True)
+
+
+# ------------------------------------------------------------------ LLM calls during ingest (prereg v4)
+
+_LLM_GROUP: "contextvars.ContextVar[str]" = contextvars.ContextVar("llm_group", default="?")
+_LLM_STATS: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+_CHECK_OUT: List[Any] = []
+_WRITTEN: set = set()  # (arm, qid) already in the output files: a rerun resumes instead of duplicating
+
+
+def install_ingest_llm(rpm: float) -> None:
+    """
+    Wrap the pipeline's LLM calls for the eval: a shared rate limit, retries on 429 and timeouts
+    until the call succeeds (the pipeline itself would return no facts on failure, which would
+    bias A5 silently), and per-conversation counts of calls, retries, empty replies and tokens.
+    """
+    from memorable_ai.core import llm_client
+
+    orig = llm_client.acompletion
+    limiter = RateLimiter(rpm)
+
+    async def wrapped(model, messages, max_tokens=800, api_key=None, timeout=None, **kw):
+        st = _LLM_STATS[_LLM_GROUP.get()]
+        delay = 15.0
+        for _ in range(80):
+            await limiter.wait()
+            try:
+                resp = await orig(model, messages, max_tokens=max_tokens, api_key=api_key, timeout=timeout, **kw)
+            except Exception as e:  # noqa: BLE001
+                text = f"{type(e).__name__}: {e}".lower()
+                if any(m in text for m in ("429", "rate limit", "too many", "timeout", "timed out", "readerror",
+                                           "connection", "502", "503", "504")):
+                    st["retries"] += 1
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 300.0)
+                    continue
+                st["errors"] += 1
+                raise
+            st["calls"] += 1
+            content = llm_client.message_content(resp) or ""
+            st["empty"] += not content.strip()
+            st["thinking"] += "<think>" in content
+            usage = getattr(resp, "usage", None) or (resp.get("usage") if isinstance(resp, dict) else None)
+            if usage is not None:
+                get = (lambda k: getattr(usage, k, 0)) if not isinstance(usage, dict) else usage.get
+                st["prompt_tokens"] += int(get("prompt_tokens") or 0)
+                st["completion_tokens"] += int(get("completion_tokens") or 0)
+            return resp
+        st["gave_up"] += 1
+        raise RuntimeError("LLM call gave up after 80 attempts")
+
+    llm_client.acompletion = wrapped
 
 
 def _public(it: Dict[str, Any]) -> Dict[str, Any]:
@@ -309,10 +481,20 @@ async def cmd_retrieve(args) -> None:
         a0 = a0_lme_subset(lme_items("all"))
         for it in items:  # A0 on LME: the held-out subset only, plus dev rows when pricing a pilot
             it["_a0"] = it["qid"] in a0 or (args.a0_dev and it["split"] == "dev")
+    if any(ARMS[a].get("subset") for a in arms):  # prereg v4: questions fixed by seed before any answer
+        subsets = v4_subsets(args.bench, items)
+        for it in items:
+            it["_subsets"] = {name for name, ids in subsets.items() if it["qid"] in ids}
+    _RUN_DIR[:] = [run]
+    if any(ARMS[a].get("ingest") == "llm" for a in arms):
+        install_ingest_llm(args.llm_rpm)
     groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for it in items:
         groups[it["group"]].append(it)
+    _GROUP_ORDER[args.bench] = sorted(groups)
     keys = list(groups)[: args.limit] if args.limit else list(groups)
+    if args.groups:  # explicit group ids (pilot)
+        keys = [k for k in keys if k in set(args.groups.split(","))]
     suffix = ""
     if args.shard:  # "i/n": this process takes every n-th group (parallel workers, one per GPU)
         i, n = (int(x) for x in args.shard.split("/"))
@@ -321,21 +503,33 @@ async def cmd_retrieve(args) -> None:
     tmp = Path(tempfile.mkdtemp(prefix="memorable_e2e_"))
     totals = {"groups": 0, "items": 0, "ingest_s": 0.0, "truncated_turns": 0, "empty": defaultdict(int)}
     t0 = time.time()
+    for name in (f"contexts_{args.bench}{suffix}.jsonl", f"checks_{args.bench}{suffix}.jsonl"):
+        if (run / name).exists():
+            _WRITTEN.update((r["arm"], r["qid"]) for r in map(json.loads, open(run / name)))
+    sem = asyncio.Semaphore(max(1, args.parallel))  # groups in flight (LLM ingests wait on the network)
     try:
-        with open(run / f"contexts_{args.bench}{suffix}.jsonl", "a") as out:
-            for gi, g in enumerate(keys):
-                s = await _contexts_for_group(groups[g], arms, tmp, out)
+        with open(run / f"contexts_{args.bench}{suffix}.jsonl", "a") as out, \
+                open(run / f"checks_{args.bench}{suffix}.jsonl", "a") as checks:
+            _CHECK_OUT[:] = [checks]
+
+            async def one(gi: int, g: str) -> None:
+                async with sem:
+                    s = await _contexts_for_group(groups[g], arms, tmp / f"g{gi}", out)
                 out.flush()
+                checks.flush()
                 totals["groups"] += 1
                 totals["items"] += len(groups[g])
                 totals["ingest_s"] += s["ingest_s"]
                 totals["truncated_turns"] += s["truncated_turns"]
                 for a, n in s["empty"].items():
                     totals["empty"][a] += n
-                if gi % 10 == 0:
-                    print(f"  {args.bench}: {gi + 1}/{len(keys)} groups, {time.time() - t0:.0f}s", flush=True)
+                print(f"  {args.bench}: {totals['groups']}/{len(keys)} groups, {time.time() - t0:.0f}s", flush=True)
+
+            await asyncio.gather(*(one(gi, g) for gi, g in enumerate(keys)))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    if _LLM_STATS:
+        totals["llm"] = {g: dict(v) for g, v in _LLM_STATS.items()}
     totals["wall_s"] = round(time.time() - t0)
     totals["peak_rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6)  # macOS: bytes
     print(json.dumps({"retrieve": args.bench, **totals}, default=dict))
@@ -588,6 +782,7 @@ async def cmd_answer(args) -> None:
             r = json.loads(line)
             if (r["arm"], r["qid"]) in done:
                 continue
+            done.add((r["arm"], r["qid"]))  # a context listed twice is answered once
             if args.arms and r["arm"] not in args.arms.split(","):
                 continue
             if args.split and r.get("split") not in (args.split, "all"):
@@ -831,6 +1026,9 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=0, help="first N conversations / haystacks only")
     p.add_argument("--a0-dev", action="store_true", help="also build full-context (A0) prompts for LME dev rows")
     p.add_argument("--shard", default="", help="i/n: process every n-th conversation/haystack (parallel workers)")
+    p.add_argument("--groups", default="", help="only these conversation/haystack ids (comma separated)")
+    p.add_argument("--parallel", type=int, default=1, help="groups processed concurrently (LLM ingests)")
+    p.add_argument("--llm-rpm", type=float, default=6.0, help="request ceiling for ingest-time LLM calls")
     for name in ("answer", "answer-loop", "decoys", "report"):
         p = sub.add_parser(name)
         p.add_argument("--run", required=True)

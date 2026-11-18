@@ -19,7 +19,7 @@ Primary metric and CIs as in v3: LLM-judge accuracy; 95% paired bootstrap over q
 
 ## Arms
 
-Answer model, judges, prompt and memory format are v3's. Retrieval is A3's unless stated.
+Answer model, judges, prompt and memory format are v3's. Retrieval is A3's unless stated. J-lenient (Mem0's judge) also runs on A5, to place it beside published numbers.
 
 | Arm | Identity | Settings | Per item |
 |---|---|---|---|
@@ -50,6 +50,7 @@ Neighbour windows were tried as a third option and dropped: no better per token 
 ## Baseline arm
 
 - **A3** for A5 and D5, **A3w** for A6: the same questions, answered in v3 by the same model, prompt and judges.
+- **Facts-only check:** A5's ingest with the facts left out (internal arm A5x, never answered) must reproduce the stored A3 contexts byte for byte. Dry run: 75/75.
 - **Drift check:** 60 subset questions of A3 are answered again inside this run. If fewer than 90% of verdicts agree with v3's, A3 and A3w are re-answered on the whole subset and used instead.
 
 ## Decoys
