@@ -213,6 +213,34 @@ def parse_json(raw: str) -> Any:
     start = min(starts)
     end_char = "]" if text[start] == "[" else "}"
     end = text.rfind(end_char)
-    if end <= start:
-        raise ValueError("unterminated JSON in LLM response")
-    return json.loads(text[start : end + 1])
+    if end > start:
+        try:
+            return json.loads(text[start : end + 1])
+        except ValueError:
+            pass
+    if text[start] == "[":
+        items = salvage_array(text[start:])
+        if items:
+            logger.debug("LLM JSON array was cut off; kept %d complete items", len(items))
+            return items
+    raise ValueError("unterminated or malformed JSON in LLM response")
+
+
+def salvage_array(text: str) -> List[Any]:
+    """
+    The complete items of a JSON array whose tail is cut off or malformed: a reply that hit
+    ``max_tokens`` keeps every item written before the cut instead of losing them all.
+    """
+    dec = json.JSONDecoder()
+    i, n, items = 1, len(text), []
+    while i < n:
+        while i < n and text[i] in " \t\r\n,":
+            i += 1
+        if i >= n or text[i] == "]":
+            break
+        try:
+            obj, i = dec.raw_decode(text, i)
+        except ValueError:
+            break
+        items.append(obj)
+    return items

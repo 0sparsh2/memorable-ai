@@ -380,7 +380,9 @@ class MemoryExtractor:
             turns="\n".join(lines),
             ontology=self.ontology.prompt_block(),
         )
-        items = await self._call_llm_json(prompt, max_tokens=1200)
+        # About 150 output tokens per message: a long session's facts, with their entities and
+        # relations, ran past a fixed 1,200 and were cut off mid-item (the pilot lost 9 of 38).
+        items = await self._call_llm_json(prompt, max_tokens=min(4096, 800 + 150 * len(turns)))
         if isinstance(items, dict):
             items = items.get("memories") or items.get("facts") or [items]
         out: List[Dict[str, Any]] = []
