@@ -1,6 +1,6 @@
 {
   "k": 5,
-  "embedder": "torch:/kaggle/input/notebooks/sparshnagpal/memorable-embed-ft/models/minilm",
+  "embedder": "torch:/kaggle/input/memorable-embed-ft/models/minilm",
   "turn_context": 0.5,
   "conversations": 10,
   "fusion": "default",

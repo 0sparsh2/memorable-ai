@@ -138,3 +138,25 @@ First stage: score fusion, top 20; each reranker reorders those 20.
 - The bar asks for improvement on both benchmarks and is not relaxed after the fact. Round 2 re-tests every model under the same bars with the NIM-generated data.
 - **A4** in the end-to-end QA eval (`benchmarks/qa`) = A3 with the fine-tuned MiniLM, the only model that passed. It is built after round 2, so that one A4 arm carries every model that passes then.
 
+
+## 5. Fine-tuning, round 2 (15,738 synthetic questions)
+
+**Data.** NIM (Nemotron-3.5-Bolt, free tier) generated 15,272 questions over 2,681 conversations before the run stopped, plus round 1's 448 salvaged conversations. Ten conversations appeared in both under different ids and are dropped. After the teacher filter: 15,738 questions, 16,228 training pairs, about 6× round 1. All seven runs took 31 min on 2× T4 ([results_ft_train_v2.json](../benchmarks/embeddings/results_ft_train_v2.json)). On held-out synthetic conversations: leaf-ir 0.825 → 0.853, MiniLM 0.733 → 0.899, potion 0.686 → 0.737, MiniLM reranker 0.825 → 0.911, Ettin-17M 0.811 → 0.885, Ettin-32M 0.863 → 0.925.
+
+**Verdicts against the §0 bars**, same protocol and code as round 1, at commit a688f15 ([results_ft_compare_v2.json](../benchmarks/embeddings/results_ft_compare_v2.json), [results_ft_e2e_v2.json](../benchmarks/embeddings/results_ft_e2e_v2.json); end-to-end CIs are paired bootstraps over the 1,536 questions):
+
+| Model | Bar | Result | Verdict |
+|---|---|---|---|
+| MiniLM (semantic tier) | episode recall@5 end to end ≥ +1.0 pt; no drop in LME session@5 or LoCoMo turn@5 | episode 0.575 → 0.585 (**+0.98**, CI −1.2…+3.1; 142 questions better, 127 worse; multi-hop 0.663 → 0.713, open-domain 0.457 → 0.435); turn@5 unchanged; LME session@5 0.980 = 0.980. Its own dense turn recall: LoCoMo 0.433 → 0.725 (+29.2, CI +26.9…+31.7), LME turn@10 0.813 → 0.900 | Fail (0.02 pt short) |
+| leaf-ir (turn model) | LoCoMo fused turn@5 ≥ +1.0, CI > 0 | +0.6 (CI −0.9…+2.1); end to end 0.701 → 0.699. LongMemEval improved a lot: dense turn@5 0.727 → 0.827 (+10.0, CI +4.7…+15.3), fused turn@10 +2.7 (CI +0.7…+5.3) | Fail |
+| potion-32M lr 0.05 (fast profile) | fused score improves on both; segmentation within ±10% | LoCoMo +1.0 (CI +0.3…+1.8); LME turn@10 +1.3 (2 questions, CI 0…+3.3), turn@5 ±0 | Improvement clause met as written, the LME part inside noise. Not confirmed end to end; segmentation unaffected if it replaces only the fast-profile turn model |
+| Ettin-17M reranker | turn@5 and turn@10 improve on both, CI > 0 | LoCoMo +4.8 (CI +3.4…+6.3) / +3.5; LME +1.3 (CI −2.0…+4.7) / +1.3 (CI 0…+3.3) | Fail |
+| MiniLM-L6 reranker | same | LoCoMo +5.8 (CI +4.5…+7.2) / +3.6; LME ±0 / +0.7 | Fail |
+| Ettin-32M reranker | same | LoCoMo +4.5 (CI +3.2…+5.9) / +2.2 (CI +1.4…+2.9); LME turn@5 **+5.3 (CI +2.0…+9.3)**, turn@10 +2.0 (CI 0.0…+4.7). p50 28 / 42 ms | Fail: the LME turn@10 interval touches 0 |
+
+**Reading.**
+- Six times more data moved the models where round 1 was weakest. LongMemEval now responds: leaf-ir +10 pts dense turn@5, Ettin-32M +5.3 reranked turn@5. LoCoMo gains held or grew.
+- Every model still misses a bar, mostly by noise-sized margins on a near-ceiling metric: LME turn@10 sits at 0.92–0.96, where 150 questions resolve about ±3 pts. The bars are not relaxed after the fact.
+- MiniLM's end-to-end episode gain is fragile in both rounds: round 1's +1.3 passed the bar as written, but the paired interval this round spans zero.
+- **A4** (end-to-end QA eval) follows the prereg: A3 plus every model that passed its bar, which is only round 1's MiniLM.
+- Next: the bars' weak point is LongMemEval's 150-question sample. A larger LongMemEval sample, from dev rows only, would make the "no regression" and "improves on both" checks meaningful, but it needs a new preregistration before any model is re-judged on it.
