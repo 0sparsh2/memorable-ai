@@ -39,6 +39,7 @@ from memorable_ai.core.models import (  # noqa: F401  (re-exported for compatibi
     MemorableMeta,
     Memory,
     SessionRecord,
+    Task,
     Turn,
 )
 from memorable_ai.core.vector_index import STOPWORDS, LexicalIndex, VectorIndex, light_stem
@@ -996,6 +997,11 @@ class Storage:
             counts["entity_aliases"] = (
                 self._ns_filter(session.query(EntityAlias), EntityAlias)
                 .filter(EntityAlias.user_id == user_id)
+                .delete(synchronize_session=False)
+            )
+            counts["tasks"] = (
+                self._ns_filter(session.query(Task), Task)
+                .filter(Task.user_id == user_id)
                 .delete(synchronize_session=False)
             )
             counts["sessions"] = (

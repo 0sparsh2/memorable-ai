@@ -73,6 +73,9 @@ Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instru
 - Graph relations are stored under canonical predicates, and single-valued predicates come from the ontology instead of `FUNCTIONAL_PREDICATES` (kept as a derived constant). A move written as `relocated_to` now supersedes `lives_in`, and a symmetric single-valued relation (`married_to`) is superseded from either end.
 - Python 3.10+ is required. 3.8 and 3.9 are past end of life, and current numpy, sentence-transformers and onnxruntime need 3.10+. CI now tests 3.10–3.14 with current GitHub Actions.
 
+### Fixed
+- `forget_user()` left the user's procedural `tasks` rows behind (found while building G1). It now deletes them, and the new entity aliases too.
+
 ### Fixed (found by the G0 deep evaluation, `docs/g0_deep_evaluation.md`)
 - The graph engine synced invalidations by timestamp and could permanently miss one committed out of order. Sync now follows a commit-ordered write sequence.
 - Nodes whose edges were all invalidated kept teleport mass as seeds.

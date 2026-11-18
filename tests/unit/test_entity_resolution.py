@@ -6,7 +6,7 @@ import pytest
 
 from memorable_ai.core.embeddings import get_embedder
 from memorable_ai.core.extraction import MemoryExtractor
-from memorable_ai.core.models import Edge, Entity, EntityAlias
+from memorable_ai.core.models import Edge, Entity, EntityAlias, Task
 from memorable_ai.core.scope import Scope
 from memorable_ai.core.storage import Storage
 from memorable_ai.graph.knowledge_graph import KnowledgeGraph
@@ -289,15 +289,21 @@ def test_episode_mentions_use_resolution(storage, emb, kg):
     assert {e.name for e in ents(storage).values()} == {"Robert Chen", "Oslo"}
 
 
-def test_forget_user_removes_aliases(storage, emb, kg):
+def test_forget_user_removes_aliases_and_tasks(storage, emb, kg):
     add(storage, emb, kg, "Robert Chen is User's colleague", [("Robert Chen", "person")],
         [("User", "colleague_of", "Robert Chen")])
     add(storage, emb, kg, "Bob lives in Oslo", [("Bob", "person")], [("Bob", "lives_in", "Oslo")])
-    counts = storage.forget_user("u")
-    assert counts["entity_aliases"] == 1
     s = storage.get_session()
     try:
-        assert s.query(EntityAlias).count() == 0
+        s.add(Task(user_id="u", session_id="s", goal_text="x", status="open", started_at=datetime(2026, 11, 18)))
+        s.commit()
+    finally:
+        s.close()
+    counts = storage.forget_user("u")
+    assert counts["entity_aliases"] == 1 and counts["tasks"] == 1
+    s = storage.get_session()
+    try:
+        assert s.query(EntityAlias).count() == 0 and s.query(Task).count() == 0
     finally:
         s.close()
 
