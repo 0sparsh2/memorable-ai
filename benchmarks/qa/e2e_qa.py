@@ -461,6 +461,16 @@ def install_ingest_llm(rpm: float) -> None:
             content = llm_client.message_content(resp) or ""
             st["empty"] += not content.strip()
             st["thinking"] += "<think>" in content
+            body = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip())
+            if body[:1] in ("[", "{"):  # every ingest-time job answers in JSON
+                try:
+                    json.loads(body)
+                except ValueError:
+                    try:
+                        llm_client.parse_json(content)
+                        st["json_repaired"] += 1  # cut off, complete items kept
+                    except ValueError:
+                        st["json_failed"] += 1
             usage = getattr(resp, "usage", None) or (resp.get("usage") if isinstance(resp, dict) else None)
             if usage is not None:
                 get = (lambda k: getattr(usage, k, 0)) if not isinstance(usage, dict) else usage.get
