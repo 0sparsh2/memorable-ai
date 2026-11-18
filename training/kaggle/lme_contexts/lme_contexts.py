@@ -12,7 +12,7 @@ Output in /kaggle/working:
 No answers are produced here, and no model is called; the answer stage runs separately.
 
 A4 mode (prereg v3 amendment A3): when the fine-tuned MiniLM dataset is mounted
-(memorable-ft-minilm-v1, folder minilm_ft_v1), the job builds A3 and A4 instead, with
+(memorable-ft-minilm-v1; Kaggle unpacks it flat at the dataset root), the job builds A3 and A4 instead, with
 that model as A4's semantic model. A3 is rebuilt only to check it matches the stored
 A3 contexts byte for byte, so A4 differs from A3 by the model alone.
 """
@@ -30,7 +30,7 @@ BRANCH = "feat/memory-architecture"
 SRC = "/kaggle/tmp/memorable"
 OUT = "/kaggle/working"
 ARMS = "A0,A1,A2,A3,A3w"
-A4_MODEL_GLOB = "/kaggle/input/**/minilm_ft_v1/config.json"
+A4_MODEL_GLOB = "/kaggle/input/**/memorable-ft-minilm-v1/modules.json"
 
 
 def sh(cmd, **kw):
@@ -63,10 +63,15 @@ def main():
                     TOKENIZERS_PARALLELISM="false", PYTHONUNBUFFERED="1")
     arms, out_name = ARMS, "contexts_lme.jsonl"
     a4 = sorted(glob.glob(A4_MODEL_GLOB, recursive=True))
+    mounted = sorted(glob.glob("/kaggle/input/*")) + sorted(glob.glob("/kaggle/input/*/*"))
+    print("mounted inputs:", mounted[:20], flush=True)
+    if mounted and not a4:  # an input was attached for a reason: never fall back silently
+        raise SystemExit("an input is mounted but the A4 model was not found; not rebuilding v3's arms")
     if a4:
         arms, out_name = "A3,A4", "contexts_lme_a3a4.jsonl"
         base_env["MEMORABLE_QA_A4_EMBEDDER"] = "torch:" + os.path.dirname(a4[0])
         print("A4 mode, model", os.path.dirname(a4[0]), flush=True)
+    print("arms:", arms, flush=True)
     procs = []
     for i in range(n):
         env = dict(base_env, CUDA_VISIBLE_DEVICES=str(i))
