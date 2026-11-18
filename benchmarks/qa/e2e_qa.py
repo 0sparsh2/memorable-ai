@@ -265,6 +265,8 @@ def _engine(db: Path, embedding_model: Optional[str] = None, llm: bool = False):
 
 async def _ingest(item: Dict[str, Any], db: Path, embedding_model: Optional[str] = None, llm: bool = False):
     eng = _engine(db, embedding_model, llm)
+    if llm and item["bench"] == "locomo":  # prereg v4.2: the harness feeds speaker A in as the user; name them
+        eng.set_user_name(item["_sample"]["conversation"].get("speaker_a"), user_id=item["group"])
     uid = item["group"]
     if item["bench"] == "locomo":
         from benchmarks.locomo.loader import format_turn_text
