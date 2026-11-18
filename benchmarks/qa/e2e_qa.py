@@ -428,8 +428,15 @@ def install_ingest_llm(rpm: float) -> None:
     until the call succeeds (the pipeline itself would return no facts on failure, which would
     bias A5 silently), and per-conversation counts of calls, retries, empty replies and tokens.
     """
+    from dotenv import dotenv_values
+
     from memorable_ai.core import llm_client
 
+    if not (os.environ.get("NVIDIA_NIM_API_KEY") or os.environ.get("NVIDIA_API_KEY")):
+        env = dotenv_values(ROOT / ".env")  # the key is read, never printed
+        key = (env.get("NVIDIA_NIM_API_KEY") or env.get("NVIDIA_API_KEY") or "").strip()
+        if key:
+            os.environ["NVIDIA_NIM_API_KEY"] = key
     orig = llm_client.acompletion
     limiter = RateLimiter(rpm)
 

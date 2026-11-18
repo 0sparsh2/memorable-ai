@@ -1,6 +1,6 @@
 # Preregistration v4 (DRAFT): LLM facts and a wider window, end-to-end QA
 
-**Status:** draft, 2026-11-18, for the owner's review. It freezes when its pilot starts. It is a new eval beside [prereg-v3.md](prereg-v3.md): v3's arms, bars and running answers are untouched, and A3 / A3w answers from v3 are the baselines here.
+**Status:** frozen 2026-11-18 when the pilot started; the owner approved piloting both arms. Before that it was a draft for review. It is a new eval beside [prereg-v3.md](prereg-v3.md): v3's arms, bars and running answers are untouched, and A3 / A3w answers from v3 are the baselines here.
 
 **Why.** Every arm in v3 ingests without an LLM, so contexts hold turns and episode summaries but no extracted facts. Every system above us on the leaderboards (Mem0, Hindsight, Mastra, Agent Zero) answers from LLM-extracted memories. Separately, retrieval coverage keeps rising past A3w's 40 turns (below).
 
@@ -85,4 +85,4 @@ Facts per session, extraction calls and retries per conversation, entity adjudic
 - Answers and judges (Lightning, shared with v3's loop): ~3.9k calls, ~3 days at the loop's current pace, interleaved with v3's backlog.
 - Cost $0 on NIM's free tier.
 
-`PREREG: ok` (draft; freezes at the pilot)
+`PREREG: ok` (frozen at the pilot, 2026-11-18)
