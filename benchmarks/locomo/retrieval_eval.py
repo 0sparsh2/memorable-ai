@@ -8,6 +8,10 @@ the annotated evidence turns (``dia_id``s) come back in the top-k:
 * turn recall@k for each signal (dense, lexical, fused RRF) and for the retriever's own
   turn ranking (``turn/pipeline``: score or rank fusion, per ``--fusion``)
 * episode recall@k (an episode "hits" when it contains an evidence turn)
+* fact recall@k: ``fact/graph`` (Personalized PageRank alone) and ``fact/pipeline``
+  (the retriever's fused fact ranking); a fact hits when one of its source turns is
+  evidence. Without an LLM the facts are pattern-extracted, so these measure the graph
+  machinery on sparse facts, not the facts an LLM would write
 
 This measures the retrieval layer only. It is *not* LoCoMo QA accuracy (that
 needs an answer model plus a judge; see ``benchmark.py``). Category 5
@@ -50,14 +54,15 @@ async def evaluate(convs: int, k: int, embedder: str, db_dir: Path, turn_context
                    fusion: str = "", rerank: str = "", rerank_blend: float = 0.0) -> Dict:
     os.environ["MEMORABLE_LLM__EMBEDDING_MODEL"] = embedder
     from memorable_ai import MemoryEngine
-    from memorable_ai.core.models import Episode, Turn
+    from memorable_ai.core.models import Entity, Episode, Memory, Turn
     from memorable_ai.core.scope import Scope
     from memorable_ai.core.vector_index import reciprocal_rank_fusion
 
     data = load_locomo()
     totals = defaultdict(lambda: defaultdict(lambda: [0, 0]))  # signal -> category -> [hits, n]
     timings = {"ingest_s": 0.0, "query_ms": []}
-    stats = {"turns": 0, "episodes": 0, "facts": 0, "questions": 0}
+    per_q = defaultdict(list)  # signal -> 0/1 per question, in question order (paired comparisons)
+    stats = {"turns": 0, "episodes": 0, "facts": 0, "questions": 0, "entities": 0, "relations": 0}
 
     for ci, sample in enumerate(data[:convs]):
         conv_id = sample_id(sample, ci)
@@ -95,8 +100,12 @@ async def evaluate(convs: int, k: int, embedder: str, db_dir: Path, turn_context
             for tid, eid in s.query(Turn.id, Turn.episode_id).all():
                 ep_dias[eid].add(dia_by_turn.get(tid))
             stats["episodes"] += s.query(Episode).count()
+            fact_dias = {mid: {dia_by_turn.get(t) for t in (src or [])}
+                         for mid, src in s.query(Memory.id, Memory.source_turn_ids).all()}
+            stats["entities"] += s.query(Entity).count()
         finally:
             s.close()
+        stats["relations"] += len(eng._knowledge_graph.relations(Scope(user_id=conv_id)))
         stats["turns"] += len(dia_by_turn)
         stats["facts"] += eng.get_stats().get("active_memories", 0)
 
@@ -137,6 +146,8 @@ async def evaluate(convs: int, k: int, embedder: str, db_dir: Path, turn_context
                 items = r._rerank(qa.question, items, [first[t["id"]] for t in items], depth=r.rerank_depth)
                 reranked = [t["id"] for t in items]
             eps = r._rank_layer("episode", qa.question, qvec, scope, k)
+            graph_facts = [i for i, _ in eng._knowledge_graph.ppr(qa.question, scope, k=k)]
+            pipe_facts = [i for i, _ in r.rank_facts(qa.question, scope, k=k, qvec=qvec)]
             timings["query_ms"].append((time.time() - q0) * 1000)
             cat = CATEGORY_NAMES.get(qa.category, str(qa.category))
             signals = [("turn/dense", dense), ("turn/lexical", lexical), ("turn/fused", fused),
@@ -145,9 +156,16 @@ async def evaluate(convs: int, k: int, embedder: str, db_dir: Path, turn_context
                 signals.append(("turn/reranked", reranked))
             for name, ids in signals:
                 hit = bool(gold & {dia_by_turn.get(i) for i in ids[:k]})
+                per_q[name].append(int(hit))
                 totals[name][cat][0] += hit
                 totals[name][cat][1] += 1
+            for name, ids in (("fact/graph", graph_facts), ("fact/pipeline", pipe_facts)):
+                fhit = any(gold & fact_dias.get(m, set()) for m in ids[:k])
+                per_q[name].append(int(fhit))
+                totals[name][cat][0] += fhit
+                totals[name][cat][1] += 1
             ep_hit = any(gold & ep_dias.get(e, set()) for e in eps[:k])
+            per_q["episode/fused"].append(int(ep_hit))
             totals["episode/fused"][cat][0] += ep_hit
             totals["episode/fused"][cat][1] += 1
         eng.close()
@@ -165,6 +183,7 @@ async def evaluate(convs: int, k: int, embedder: str, db_dir: Path, turn_context
             "overall": round(hits / n, 3) if n else None,
             **{c: round(h / n_, 3) for c, (h, n_) in sorted(cats.items()) if n_},
         }
+    report["per_question"] = {s: "".join(map(str, v)) for s, v in per_q.items()}
     return report
 
 

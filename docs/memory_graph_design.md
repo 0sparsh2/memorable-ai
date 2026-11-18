@@ -218,6 +218,19 @@ Every node and edge carries a tier: **`user`** (private; `user_id` set) or **`or
 
 **Merges.** `merge_entities` moves edges to the kept entity (marked `extra.merged_from`, so a merge can be undone), turns the duplicate's names into aliases, sets `merged_into_id` and writes an `alias_of` edge. Lookups follow merges.
 
+**Measured** (LoCoMo, 10 conversations, 1,536 questions, no LLM, paired bootstrap over questions; `retrieval_eval.py --convs 10`, before vs after G1):
+
+| Signal | Before | G1 | Δ (95% CI) |
+|---|---|---|---|
+| turn recall@5 (pipeline) | 0.701 | 0.701 | 0 (no question changed) |
+| episode recall@5 | 0.575 | 0.575 | 0 |
+| fact recall@5, graph PPR alone | 0.014 | 0.018 | +0.4 pts (+0.1, +0.7) |
+| fact recall@5, fused pipeline | 0.057 | 0.059 | +0.2 pts (0.0, +0.5): no measurable change |
+| entities | 940 | 907 | −3.5% (name variants folded) |
+| ingest / query p50 | 43.6 s / 10.4 ms | 44.6 s / 11.3 ms | within noise |
+
+Without an LLM the patterns extract only 227 facts and 113 relations from 10 conversations, so the graph has little to work with. G1's real test is LLM extraction (typed entities and relations on every fact). That run belongs with the G2 retrieval work.
+
 **Deferred.** Embedding candidates (name + summary vectors) wait for G2, which embeds entities for query seeding anyway. Until then near-synonyms like "NYC" and "New York City" need an alias, an LLM extraction that names them the same way, or a merge.
 
 ## 5. Read path
