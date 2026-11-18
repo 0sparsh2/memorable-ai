@@ -10,6 +10,13 @@ user), ``fact`` rows (memories), ``episode`` and ``turn`` rows. This module writ
     graph nodes too (the HippoRAG 2 "passage node" idea)
   * ``mentions`` episode -> entity
 
+Predicates go through the ontology (``graph/ontology.py``): "moved_to" becomes
+``lives_in``, "child_of" becomes ``parent_of`` with the ends swapped, symmetric ones
+("sibling_of") are stored once with the user first. The extractor's own word survives
+on the edge (``extra.raw``, ``extra.role``), so "sister" is not lost to ``sibling_of``.
+Mentions are matched to existing entities by ``graph/resolution.py`` (names, aliases,
+nicknames, graph context; an LLM only for leftovers).
+
 Single-valued predicates (lives_in, works_at, ...) invalidate the previous edge
 for the same subject, as in Graphiti/Zep. The superseded fact ids are returned so
 the write pipeline can retire the stale facts too.
@@ -29,31 +36,24 @@ import re
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from memorable_ai.core.models import Edge, Entity
+from memorable_ai.core.models import Edge, Entity, EntityAlias
 from memorable_ai.core.scope import Scope
 from memorable_ai.core.vector_index import STOPWORDS, light_stem
 from memorable_ai.graph.engine import GraphEngine
+from memorable_ai.graph.ontology import Ontology, default_ontology, raw_role
+from memorable_ai.graph.resolution import Adjudicator, EntityResolver, Mention
 
 from memorable_ai.core.models import utcnow  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# (subject norm, canonical predicate, object norm, edge attributes)
+Rel = Tuple[str, str, str, Dict[str, Any]]
+
 SELF_NAMES = {"user", "the user", "i", "me", "myself"}
 
-FUNCTIONAL_PREDICATES = {
-    "lives_in",
-    "works_at",
-    "is_from",
-    "named",
-    "age",
-    "married_to",
-    "job_title",
-    "has_partner",
-    "has_wife",
-    "has_husband",
-    "has_boyfriend",
-    "has_girlfriend",
-}
+# Kept for compatibility; the ontology is the source of truth.
+FUNCTIONAL_PREDICATES = default_ontology().functional_predicates()
 
 _MONTHS = {m.lower() for m in (
     "January February March April May June July August September October November December "
@@ -116,10 +116,17 @@ class KnowledgeGraph:
         storage: Any,
         functional_predicates: Optional[Iterable[str]] = None,
         engine: Optional[GraphEngine] = None,
+        ontology: Optional[Ontology] = None,
+        adjudicator: Optional[Adjudicator] = None,
     ):
         self.storage = storage
-        self.functional = set(functional_predicates or FUNCTIONAL_PREDICATES)
+        self.ontology = ontology or default_ontology(functional_predicates)
         self.engine = engine or GraphEngine(storage)
+        self.adjudicator = adjudicator  # async LLM tie-breaker for ambiguous mentions
+
+    @property
+    def functional(self) -> Set[str]:
+        return self.ontology.functional_predicates()
 
     # ------------------------------------------------------------------ extraction
 
@@ -172,39 +179,79 @@ class KnowledgeGraph:
 
     # ------------------------------------------------------------------ writes
 
+    @staticmethod
+    def _norm(name: str) -> str:
+        n = normalize_entity(name)
+        return "user" if n in SELF_NAMES else n
+
+    def _resolver(self, scope: Scope) -> EntityResolver:
+        def scoped(q, model):
+            q = q.filter(model.namespace == scope.namespace if scope.namespace else model.namespace.is_(None))
+            return q.filter(model.user_id == scope.user_id if scope.user_id else model.user_id.is_(None))
+
+        return EntityResolver(scoped)
+
+    def _create_entity(self, session: Any, scope: Scope, name: str, entity_type: str, now: datetime) -> Entity:
+        norm = self._norm(name)
+        is_self = norm == "user"
+        ent = Entity(
+            namespace=scope.namespace, user_id=scope.user_id, agent_id=scope.agent_id,
+            name="User" if is_self else name[:255], norm_name=norm[:255],
+            entity_type="person" if is_self else (entity_type or "concept"),
+            is_self=1 if is_self else 0, mention_count=0, first_seen=now, last_seen=now,
+        )
+        session.add(ent)
+        session.flush()
+        return ent
+
+    def _self_entity(self, session: Any, scope: Scope, now: datetime, create: bool = True) -> Optional[Entity]:
+        q = self._resolver(scope)._scoped(session.query(Entity).filter(Entity.is_self == 1), Entity)
+        ent = q.first()
+        if ent is None and create:
+            ent = self._create_entity(session, scope, "User", "person", now)
+        return ent
+
+    def _add_alias(self, session: Any, scope: Scope, ent: Entity, norm: str, source: str) -> None:
+        if not norm or norm == ent.norm_name:
+            return
+        exists = session.query(EntityAlias.id).filter(EntityAlias.entity_id == ent.id, EntityAlias.alias == norm).first()
+        if not exists:
+            session.add(EntityAlias(namespace=scope.namespace, user_id=scope.user_id, entity_id=ent.id,
+                                    alias=norm[:255], source=source))
+
+    def _touch(self, session: Any, scope: Scope, ent: Entity, m: Mention, how: str, now: datetime) -> None:
+        """A mention linked to ``ent``: refresh it and keep the surface form as an alias."""
+        ent.last_seen = now
+        if ent.entity_type in (None, "", "concept") and m.etype not in (None, "", "concept"):
+            ent.entity_type = m.etype
+        if m.norm == ent.norm_name or ent.is_self:
+            return
+        if len(m.norm.split()) > len(ent.norm_name.split()) and how in ("partial", "nickname"):
+            # "Ana" then "Ana Silva": the fuller name becomes the display name
+            old = ent.norm_name
+            ent.name, ent.norm_name = m.name[:255], m.norm[:255]
+            self._add_alias(session, scope, ent, old, "partial")
+        else:
+            self._add_alias(session, scope, ent, m.norm, how if how in ("nickname", "partial", "llm") else "surface")
+
     def _get_or_create_entity(
         self, session: Any, scope: Scope, name: str, entity_type: str = "concept", now: Optional[datetime] = None
     ) -> Optional[Entity]:
-        norm = normalize_entity(name)
+        """Resolve one name without fact context (episode mentions), creating it if new."""
+        norm = self._norm(name)
         if not norm:
             return None
-        is_self = norm in SELF_NAMES
-        if is_self:
-            norm, name, entity_type = "user", "User", "person"
-        q = session.query(Entity).filter(Entity.norm_name == norm)
-        q = q.filter(Entity.namespace == scope.namespace if scope.namespace else Entity.namespace.is_(None))
-        q = q.filter(Entity.user_id == scope.user_id if scope.user_id else Entity.user_id.is_(None))
-        ent = q.first()
         now = now or utcnow()
-        if ent is None:
-            ent = Entity(
-                namespace=scope.namespace,
-                user_id=scope.user_id,
-                agent_id=scope.agent_id,
-                name=name[:255],
-                norm_name=norm[:255],
-                entity_type=entity_type or "concept",
-                is_self=1 if is_self else 0,
-                mention_count=0,
-                first_seen=now,
-                last_seen=now,
-            )
-            session.add(ent)
-            session.flush()
-        else:
+        if norm == "user":
+            ent = self._self_entity(session, scope, now)
             ent.last_seen = now
-            if ent.entity_type == "concept" and entity_type not in (None, "", "concept"):
-                ent.entity_type = entity_type
+            return ent
+        m = Mention(name, norm, self.ontology.entity_type(entity_type))
+        ids, _ = self._resolver(scope).resolve(session, [m], {}, set())
+        ent = session.get(Entity, ids[norm]) if ids.get(norm) else None
+        if ent is None:
+            return self._create_entity(session, scope, name, m.etype, now)
+        self._touch(session, scope, ent, m, self._how(ent, m), now)
         return ent
 
     def _edge(self, scope: Scope, src: Tuple[str, int], kind: str, dst: Tuple[str, int], **attrs: Any) -> Edge:
@@ -213,26 +260,131 @@ class KnowledgeGraph:
             user_id=scope.user_id,
             agent_id=scope.agent_id,
             src_kind=src[0], src_id=int(src[1]), kind=kind, dst_kind=dst[0], dst_id=int(dst[1]),
-            weight=1.0, confidence=1.0, created_at=attrs.pop("created_at", utcnow()), **attrs,
+            weight=attrs.pop("weight", 1.0), confidence=attrs.pop("confidence", 1.0),
+            created_at=attrs.pop("created_at", utcnow()), **attrs,
         )
 
-    def ingest_memory(self, memory: Dict[str, Any], scope: Scope) -> List[int]:
+    def _mentions(self, memory: Dict[str, Any]) -> Tuple[Dict[str, Mention], List[Rel], Set[str]]:
+        """
+        Entities and canonical relations of one fact:
+        ({norm: Mention}, [(subject norm, predicate, object norm, edge attrs)], norms named as entities).
+        """
+        content = memory.get("content") or ""
+        entities, relations = memory.get("entities"), memory.get("relations")
+        h_ents, h_rels = self.extract(content)
+        entities = list(entities or []) or h_ents
+        relations = list(relations or []) or h_rels
+        ont = self.ontology
+        mentions: Dict[str, Mention] = {}
+
+        def mention(name: str, etype: Optional[str]) -> Optional[str]:
+            norm = self._norm(name)
+            if not norm:
+                return None
+            if norm != "user":
+                t = ont.entity_type(etype)
+                cur = mentions.get(norm)
+                if cur is None:
+                    mentions[norm] = Mention(str(name).strip(), norm, t)
+                elif cur.etype == "concept" and t != "concept":
+                    cur.etype = t
+            return norm
+
+        named: Set[str] = set()
+        for e in entities:
+            name = e.get("name") if isinstance(e, dict) else str(e)
+            n = mention(name, e.get("type", "concept") if isinstance(e, dict) else "concept")
+            if n:
+                named.add(n)
+        rels: List[Rel] = []
+        for subj, pred, obj in relations:
+            r = ont.resolve(pred)
+            if not r.name:
+                continue
+            if r.swap:
+                subj, obj = obj, subj
+            p = ont.predicates.get(r.name)
+            sn = mention(subj, p.domain[0] if p is not None and len(p.domain) == 1 else None)
+            on = mention(obj, p.range[0] if p is not None and len(p.range) == 1 else None)
+            if not sn or not on or sn == on:
+                continue
+            flipped = r.swap
+            if ont.is_symmetric(r.name) and on == "user":  # symmetric edges: the user first
+                sn, on, flipped = on, sn, not flipped
+            word, end = raw_role(r.raw)
+            attrs: Dict[str, Any] = {}
+            extra: Dict[str, Any] = {}
+            if r.raw and r.raw != r.name:
+                extra["raw"] = r.raw
+            if word:
+                extra["role"] = word
+                extra["role_end"] = ("src" if end == "subject" else "dst") if not flipped else (
+                    "dst" if end == "subject" else "src")
+            if not r.known:
+                extra["custom"] = True
+            st = mentions[sn].etype if sn in mentions else "person"
+            ot = mentions[on].etype if on in mentions else "person"
+            if not ont.type_ok(r.name, st, ot):
+                extra["type_mismatch"] = True
+                attrs["confidence"] = 0.6
+            if extra:
+                attrs["extra"] = extra
+            rels.append((sn, r.name, on, attrs))
+            if sn in mentions:
+                mentions[sn].relations.append((r.name, "subject", on))
+            if on in mentions:
+                mentions[on].relations.append((r.name, "object", sn))
+        return mentions, rels, named
+
+    def _resolve(self, session: Any, scope: Scope, memory: Dict[str, Any], now: datetime, create_self: bool):
+        mentions, rels, named = self._mentions(memory)
+        needs_self = any("user" in (sn, on) for sn, _, on, _ in rels) or "user" in named
+        self_ent = self._self_entity(session, scope, now, create=create_self) if needs_self or not create_self else None
+        resolved: Dict[str, int] = {"user": self_ent.id} if self_ent is not None else {}
+        self_ids = {self_ent.id} if self_ent is not None else set()
+        ids, uncertain = self._resolver(scope).resolve(session, list(mentions.values()), resolved, self_ids)
+        return mentions, rels, named, self_ent, ids, uncertain
+
+    def pending_resolutions(self, memory: Dict[str, Any], scope: Scope) -> List[Dict[str, Any]]:
+        """Mentions of a fact the rules could not settle, with candidate summaries (read-only)."""
+        session = self.storage.get_session()
+        try:
+            _, _, _, _, _, uncertain = self._resolve(session, scope, memory, utcnow(), create_self=False)
+            return [{"norm": u.mention.norm, "name": u.mention.name, "type": u.mention.etype, "reason": u.reason,
+                     "candidates": [{"id": c.entity.id, "name": c.entity.name, "type": c.entity.entity_type,
+                                     "summary": c.entity.summary, "how": c.how} for c in u.candidates]}
+                    for u in uncertain]
+        finally:
+            session.rollback()
+            session.close()
+
+    async def aingest_memory(self, memory: Dict[str, Any], scope: Scope) -> List[int]:
+        """``ingest_memory`` that first asks the adjudicator (LLM) about ambiguous mentions."""
+        decisions = None
+        if self.adjudicator is not None and memory.get("id") and memory.get("content"):
+            try:
+                items = self.pending_resolutions(memory, scope)
+                if items:
+                    decisions = await self.adjudicator(memory["content"], items)
+                    allowed = {it["norm"]: {c["id"] for c in it["candidates"]} for it in items}
+                    decisions = {k: v for k, v in (decisions or {}).items()
+                                 if k in allowed and (v is None or v in allowed[k])}
+            except Exception as e:  # noqa: BLE001
+                logger.debug("Entity adjudication skipped: %s", e)
+                decisions = None
+        return self.ingest_memory(memory, scope, decisions=decisions)
+
+    def ingest_memory(self, memory: Dict[str, Any], scope: Scope,
+                      decisions: Optional[Dict[str, Optional[int]]] = None) -> List[int]:
         """
         Link a stored fact into the graph. Returns ids of *other* facts whose
         single-valued relation was superseded by this one (candidates to retire).
+        ``decisions`` (from ``aingest_memory``) settle ambiguous mentions: entity id or None (new).
         """
         mid = memory.get("id")
         content = memory.get("content") or ""
         if not mid or not content:
             return []
-        entities = memory.get("entities")
-        relations = memory.get("relations")
-        if not entities and not relations:
-            entities, relations = self.extract(content)
-        else:
-            h_ents, h_rels = self.extract(content)
-            entities = list(entities or []) or h_ents
-            relations = list(relations or []) or h_rels
         scope = Scope(scope.namespace, scope.user_id, scope.session_id,
                       scope.agent_id or memory.get("agent_id"))
 
@@ -242,8 +394,25 @@ class KnowledgeGraph:
             now = utcnow()
             seq = self.storage.next_graph_seq(session)
             valid_from = memory.get("valid_from") if isinstance(memory.get("valid_from"), datetime) else now
+            mentions, rels, named, self_ent, ids, uncertain = self._resolve(session, scope, memory, now, True)
+            how_by_norm = {u.mention.norm: "llm" for u in uncertain}
+            for norm, eid in (decisions or {}).items():
+                ids[norm] = eid
+            ents: Dict[str, Entity] = {}
+            if self_ent is not None:
+                self_ent.last_seen = now
+                ents["user"] = self_ent
+            for norm, m in mentions.items():
+                eid = ids.get(norm)
+                ent = session.get(Entity, eid) if eid else None
+                if ent is None:
+                    ent = self._create_entity(session, scope, m.name, m.etype, now)
+                else:
+                    how = how_by_norm.get(norm) if decisions and norm in decisions else None
+                    self._touch(session, scope, ent, m, how or self._how(ent, m), now)
+                ents[norm] = ent
+
             about: Dict[int, str] = {}  # entity id -> role
-            by_norm: Dict[str, Entity] = {}
 
             def link(ent: Entity, role: str) -> None:
                 if ent.id not in about:
@@ -252,57 +421,49 @@ class KnowledgeGraph:
                 elif role != "mention" and about[ent.id] == "mention":
                     about[ent.id] = role
 
-            for e in entities:
-                name = e.get("name") if isinstance(e, dict) else str(e)
-                etype = e.get("type", "concept") if isinstance(e, dict) else "concept"
-                ent = self._get_or_create_entity(session, scope, name, etype, now)
-                if ent is None:
-                    continue
-                by_norm[ent.norm_name] = ent
-                link(ent, "mention")
-            new_edges: List[Edge] = []
-            for subj, pred, obj in relations:
-                pred = re.sub(r"[^a-z0-9_]+", "_", str(pred).strip().lower()).strip("_")[:100]
-                if not pred:
-                    continue
-                s_ent = by_norm.get(normalize_entity(subj)) or self._get_or_create_entity(session, scope, subj, "concept", now)
-                o_ent = by_norm.get(normalize_entity(obj)) or self._get_or_create_entity(session, scope, obj, "concept", now)
+            for norm in named:
+                if norm in ents:
+                    link(ents[norm], "mention")
+            touched: Set[int] = set()
+            for sn, pred, on, attrs in rels:
+                s_ent, o_ent = ents.get(sn), ents.get(on)
                 if s_ent is None or o_ent is None or s_ent.id == o_ent.id:
                     continue
                 link(s_ent, "subject")
                 link(o_ent, "object")
-                existing = (
-                    session.query(Edge)
-                    .filter(
-                        Edge.kind == "relates",
-                        Edge.src_kind == "entity",
-                        Edge.src_id == s_ent.id,
-                        Edge.predicate == pred,
-                        Edge.invalidated_at.is_(None),
-                    )
-                    .all()
-                )
-                if any(r.dst_id == o_ent.id for r in existing):
+                symmetric = self.ontology.is_symmetric(pred)
+                q = session.query(Edge).filter(Edge.kind == "relates", Edge.src_kind == "entity",
+                                               Edge.predicate == pred, Edge.invalidated_at.is_(None))
+                if symmetric:
+                    ends = [s_ent.id, o_ent.id]
+                    q = q.filter(Edge.src_id.in_(ends) | Edge.dst_id.in_(ends))
+                else:
+                    q = q.filter(Edge.src_id == s_ent.id)
+                existing = q.all()
+                pair = {(s_ent.id, o_ent.id)} | ({(o_ent.id, s_ent.id)} if symmetric else set())
+                if any((r.src_id, r.dst_id) in pair for r in existing):
                     continue  # same edge already asserted
                 rel = self._edge(
                     scope, ("entity", s_ent.id), "relates", ("entity", o_ent.id),
                     predicate=pred, valid_from=valid_from, created_at=now,
-                    evidence_kind="fact", evidence_id=int(mid), seq=seq,
+                    evidence_kind="fact", evidence_id=int(mid), seq=seq, **attrs,
                 )
                 session.add(rel)
                 session.flush()
-                if pred in self.functional:
+                touched |= {s_ent.id, o_ent.id}
+                if self.ontology.is_functional(pred):
                     for old in existing:
                         old.seq = seq
                         old.invalidated_at = now
                         old.valid_to = valid_from
                         old.superseded_by_id = rel.id
+                        touched |= {old.src_id, old.dst_id}
                         if old.evidence_kind == "fact" and old.evidence_id and old.evidence_id != mid:
                             superseded_facts.append(int(old.evidence_id))
-            for eid, role in about.items():
-                new_edges.append(self._edge(scope, ("fact", int(mid)), "about", ("entity", eid),
-                                            role=role, valid_from=valid_from, created_at=now, seq=seq))
-            session.add_all(new_edges)
+            session.add_all([self._edge(scope, ("fact", int(mid)), "about", ("entity", eid),
+                                        role=role, valid_from=valid_from, created_at=now, seq=seq)
+                             for eid, role in about.items()])
+            self._refresh_summaries(session, touched, now)
             session.commit()
         except Exception as e:
             session.rollback()
@@ -311,6 +472,94 @@ class KnowledgeGraph:
         finally:
             session.close()
         return superseded_facts
+
+    @staticmethod
+    def _how(ent: Entity, m: Mention) -> str:
+        if ent.norm_name == m.norm:
+            return "exact"
+        a, b = m.norm.split(), ent.norm_name.split()
+        return "partial" if a and b and a[0] == b[0] else "nickname"
+
+    def _refresh_summaries(self, session: Any, entity_ids: Iterable[int], now: datetime, limit: int = 12) -> None:
+        """Fact sheet per entity from its valid relations, newest first (used by resolution and cards)."""
+        for eid in set(entity_ids):
+            ent = session.get(Entity, eid)
+            if ent is None or ent.is_self:
+                continue
+            rows = (session.query(Edge.src_id, Edge.predicate, Edge.dst_id)
+                    .filter(Edge.kind == "relates", Edge.invalidated_at.is_(None),
+                            (Edge.src_id == eid) | (Edge.dst_id == eid), Edge.src_kind == "entity")
+                    .order_by(Edge.id.desc()).limit(limit).all())
+            ids = {r[0] for r in rows} | {r[2] for r in rows}
+            names = dict(session.query(Entity.id, Entity.name).filter(Entity.id.in_(list(ids))).all()) if ids else {}
+            aliases = [a for (a,) in session.query(EntityAlias.alias).filter(EntityAlias.entity_id == eid).limit(5)]
+            parts = [f"{names.get(s, '?')} {p.replace('_', ' ')} {names.get(d, '?')}" for s, p, d in rows]
+            text_ = (f"also called {', '.join(aliases)}. " if aliases else "") + "; ".join(parts)
+            ent.summary = text_[:1000] or None
+            ent.summary_updated_at = now
+
+    def find_entity(self, name_or_id: Any, scope: Scope) -> Optional[int]:
+        """An entity id in this scope by id, name or alias (merges followed); None if absent."""
+        session = self.storage.get_session()
+        try:
+            if isinstance(name_or_id, int):
+                q = self._scoped(session.query(Entity.id).filter(Entity.id == name_or_id), Entity, scope)
+                ids = [r[0] for r in q.all()]
+            else:
+                norm = self._norm(str(name_or_id))
+                ids = [r[0] for r in self._scoped(
+                    session.query(Entity.id).filter(Entity.norm_name == norm), Entity, scope).all()]
+                ids += [r[0] for r in self._scoped(
+                    session.query(EntityAlias.entity_id).filter(EntityAlias.alias == norm), EntityAlias, scope).all()]
+            canon = sorted(set(self._follow_merges(session, ids).values()))
+            return canon[0] if len(canon) == 1 else None
+        finally:
+            session.close()
+
+    def merge_entities(self, duplicate_id: int, into_id: int, scope: Scope, source: str = "merge") -> bool:
+        """
+        Merge ``duplicate_id`` into ``into_id``: its names become aliases, its edges move
+        (marked ``extra.merged_from``, so the merge can be undone) and an ``alias_of``
+        edge records it.
+        """
+        session = self.storage.get_session()
+        try:
+            dup, keep = session.get(Entity, int(duplicate_id)), session.get(Entity, int(into_id))
+            if dup is None or keep is None or dup.id == keep.id or dup.is_self or keep.is_self:
+                return False
+            if (dup.namespace, dup.user_id) != (keep.namespace, keep.user_id):
+                return False
+            now, seq = utcnow(), self.storage.next_graph_seq(session)
+            self._add_alias(session, scope, keep, dup.norm_name, source)
+            for a in session.query(EntityAlias).filter(EntityAlias.entity_id == dup.id).all():
+                if a.alias == keep.norm_name:
+                    session.delete(a)
+                else:
+                    a.entity_id = keep.id
+            for e in session.query(Edge).filter(Edge.invalidated_at.is_(None), Edge.kind != "alias_of",
+                                                ((Edge.src_kind == "entity") & (Edge.src_id == dup.id))
+                                                | ((Edge.dst_kind == "entity") & (Edge.dst_id == dup.id))).all():
+                if e.src_kind == "entity" and e.src_id == dup.id:
+                    e.src_id = keep.id
+                if e.dst_kind == "entity" and e.dst_id == dup.id:
+                    e.dst_id = keep.id
+                e.extra = {**(e.extra or {}), "merged_from": dup.id}
+                e.seq = seq
+            keep.mention_count = (keep.mention_count or 0) + (dup.mention_count or 0)
+            if keep.entity_type in (None, "", "concept"):
+                keep.entity_type = dup.entity_type
+            dup.merged_into_id = keep.id
+            session.add(self._edge(scope, ("entity", dup.id), "alias_of", ("entity", keep.id),
+                                   created_at=now, seq=seq, source=source))
+            self._refresh_summaries(session, [keep.id], now)
+            session.commit()
+            return True
+        except Exception as e:
+            session.rollback()
+            logger.warning("Entity merge failed: %s", e)
+            return False
+        finally:
+            session.close()
 
     def ingest_episode(self, episode_id: int, names: Sequence[str], scope: Scope) -> None:
         """Link an episode to the entities it mentions."""
@@ -352,6 +601,23 @@ class KnowledgeGraph:
             return q.filter((model.user_id == scope.user_id) | (model.user_id.is_(None)))
         return q.filter(model.user_id == scope.user_id)
 
+    def _follow_merges(self, session: Any, ids: Iterable[int]) -> Dict[int, int]:
+        """entity id -> the entity it was merged into (or itself)."""
+        out = {i: i for i in ids}
+        pending = set(out)
+        for _ in range(5):
+            if not pending:
+                break
+            rows = session.query(Entity.id, Entity.merged_into_id).filter(
+                Entity.id.in_(list(pending)), Entity.merged_into_id.isnot(None)).all()
+            moved = {i: t for i, t in rows}
+            pending = set()
+            for k, v in out.items():
+                if v in moved:
+                    out[k] = moved[v]
+                    pending.add(moved[v])
+        return out
+
     def match_query_entities(
         self, query: str, scope: Scope, include_shared: bool = False
     ) -> Dict[int, float]:
@@ -364,35 +630,53 @@ class KnowledgeGraph:
                 if g and g not in STOPWORDS and g not in SELF_NAMES and len(g) > 1:
                     grams.add(g)
         seeds: Dict[int, float] = {}
+
+        def seed(eid: int, w: float) -> None:
+            seeds[eid] = max(seeds.get(eid, 0.0), w)
+
         session = self.storage.get_session()
         try:
             if grams:
-                q = session.query(Entity.id, Entity.norm_name, Entity.is_self).filter(
-                    Entity.norm_name.in_(list(grams))
-                )
-                for eid, norm, is_self in self._scoped(q, Entity, scope, include_shared).all():
-                    if not is_self:
-                        seeds[eid] = max(seeds.get(eid, 0.0), 1.0 + 0.25 * (len(norm.split()) - 1))
-            # Predicate words on the user's own edges: "my sister" -> (User)-has_sister->(Emma)
+                hits: List[Tuple[int, str, float]] = []
+                q = session.query(Entity.id, Entity.norm_name, Entity.is_self).filter(Entity.norm_name.in_(list(grams)))
+                hits += [(eid, norm, 1.0) for eid, norm, is_self in self._scoped(q, Entity, scope, include_shared).all()
+                         if not is_self]
+                q = session.query(EntityAlias.entity_id, EntityAlias.alias).filter(EntityAlias.alias.in_(list(grams)))
+                hits += [(eid, a, 0.9) for eid, a in self._scoped(q, EntityAlias, scope, include_shared).all()]
+                canon = self._follow_merges(session, [h[0] for h in hits])
+                for eid, norm, w in hits:
+                    seed(canon[eid], w + 0.25 * (len(norm.split()) - 1))
+            # Role and predicate words on the user's own edges, in either direction:
+            # "my sister" -> (User)-sibling_of->(Emma); "my mother" -> (Ann)-parent_of->(User)
             q_stems = {_stem(w) for w in words if w.lower() not in STOPWORDS}
             if q_stems:
                 self_q = self._scoped(session.query(Entity.id).filter(Entity.is_self == 1), Entity, scope, include_shared)
-                self_ids = [r[0] for r in self_q.all()]
+                self_ids = {r[0] for r in self_q.all()}
                 if self_ids:
                     rels = (
-                        session.query(Edge.predicate, Edge.dst_id)
+                        session.query(Edge.predicate, Edge.src_id, Edge.dst_id, Edge.extra)
                         .filter(
                             Edge.kind == "relates",
                             Edge.src_kind == "entity",
-                            Edge.src_id.in_(self_ids),
+                            Edge.src_id.in_(list(self_ids)) | Edge.dst_id.in_(list(self_ids)),
                             Edge.invalidated_at.is_(None),
                         )
                         .all()
                     )
-                    for pred, obj_id in rels:
-                        pwords = {_stem(w) for w in pred.split("_") if w not in STOPWORDS and w not in ("has", "is")}
-                        if pwords & q_stems:
-                            seeds[obj_id] = max(seeds.get(obj_id, 0.0), 0.8)
+                    for pred, src, dst, extra in rels:
+                        self_is_src = src in self_ids
+                        other = dst if self_is_src else src
+                        if other in self_ids:
+                            continue
+                        p = self.ontology.predicates.get(pred)
+                        has_roles = p is not None and bool(p.subject_terms or p.object_terms)
+                        terms = {_stem(w) for w in self.ontology.query_terms(pred, other_is_object=self_is_src)}
+                        if terms & q_stems:
+                            seed(other, 0.6 if has_roles else 0.8)
+                        ex = extra if isinstance(extra, dict) else {}
+                        role = ex.get("role")
+                        if role and (ex.get("role_end") == "dst") == self_is_src and _stem(role) in q_stems:
+                            seed(other, 0.8)  # the extractor's own word ("sister") beats the generic group
         finally:
             session.close()
         return seeds
@@ -453,7 +737,9 @@ class KnowledgeGraph:
         session = self.storage.get_session()
         try:
             ent_q = self._scoped(session.query(Entity.id).filter(Entity.norm_name == norm), Entity, scope)
-            ids = [r[0] for r in ent_q.all()]
+            al_q = self._scoped(session.query(EntityAlias.entity_id).filter(EntityAlias.alias == norm), EntityAlias, scope)
+            ids = sorted(set(self._follow_merges(session, [r[0] for r in ent_q.all()] + [r[0] for r in al_q.all()])
+                             .values()))
             if not ids:
                 return []
             mem_ids = [

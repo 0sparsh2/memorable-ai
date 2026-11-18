@@ -145,8 +145,10 @@ class MemoryExtractor:
         extraction_mode: str = "hybrid",
         summary_store: Optional[Any] = None,
         context_window: int = 6,
+        ontology: Optional[Any] = None,
     ):
         from memorable_ai.core.embeddings import as_embedder
+        from memorable_ai.graph.ontology import default_ontology
 
         self.llm_client = llm_client
         self.embedding_model = embedding_model
@@ -155,6 +157,7 @@ class MemoryExtractor:
         self.extraction_mode = extraction_mode
         self.summary_store = summary_store
         self.context_window = context_window
+        self.ontology = ontology or default_ontology()
 
     # ------------------------------------------------------------------ public API
 
@@ -375,6 +378,7 @@ class MemoryExtractor:
             summary=session_summary or "(none)",
             context="\n".join(ctx_lines) or "(none)",
             turns="\n".join(lines),
+            ontology=self.ontology.prompt_block(),
         )
         items = await self._call_llm_json(prompt, max_tokens=1200)
         if isinstance(items, dict):
@@ -501,16 +505,19 @@ New messages (extract from these):
 Return a JSON array. Each item:
 {{"content": "standalone statement", "type": "fact|preference|skill|rule|context",
   "importance": 1-5, "event_date": "YYYY-MM-DD or null",
-  "entities": [{{"name": "...", "type": "person|place|organization|product|event|concept"}}],
-  "relations": [["subject", "predicate_snake_case", "object"]],
+  "entities": [{{"name": "...", "type": "one of the entity types below"}}],
+  "relations": [["subject", "predicate", "object"]],
   "turns": [message indices]}}
+
+{ontology}
 
 Rules:
 - One atomic statement per item. Refer to the user as "User" and use full names for other people.
 - Resolve pronouns and relative dates ("yesterday", "last week") into explicit names and calendar dates using today's date.
 - Extract what the user states about themselves, their life, people they know, plans, preferences and instructions for the assistant ("rule"). Include facts the assistant states only if the user confirmed them.
 - Skip greetings, questions, generic knowledge, and anything not useful in a future conversation.
-- relations use short snake_case predicates, e.g. ["User", "lives_in", "Berlin"], ["Emma", "sister_of", "User"].
+- relations use the predicates above where one fits, e.g. ["User", "lives_in", "Berlin"], ["Emma", "sibling_of", "User"]. Keep the most specific word when it matters ("sister_of" is fine).
+- Name each entity the same way every time; for a person you know by full name, use the full name.
 - Return [] if there is nothing worth remembering. Output JSON only.
 """
 

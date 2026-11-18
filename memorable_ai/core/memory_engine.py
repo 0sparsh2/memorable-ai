@@ -201,13 +201,19 @@ class MemoryEngine:
         ext_cfg = cfg.memory.extraction
         rcfg = cfg.memory.retrieval
 
-        self._knowledge_graph = KnowledgeGraph(self._storage)
+        from memorable_ai.core import llm_client
+        from memorable_ai.graph.resolution import llm_adjudicator
+
+        adjudicator = (llm_adjudicator(llm_model)
+                       if cfg.memory.entity_resolution_llm and llm_client.llm_enabled(llm_model) else None)
+        self._knowledge_graph = KnowledgeGraph(self._storage, adjudicator=adjudicator)
         self._summary_store = ConversationSummaryStore(self._storage, llm_model=llm_model)
         self._extraction = MemoryExtractor(
             embedding_model=self._embedder,
             llm_model=llm_model,
             extraction_mode=ext_cfg.mode,
             summary_store=self._summary_store,
+            ontology=self._knowledge_graph.ontology,
         )
         self._updater = MemoryUpdater(
             storage=self._storage,
@@ -592,7 +598,7 @@ class MemoryEngine:
                 applied = [{**memory, "id": mid, "op": op}]
             for fact in applied:
                 if fact.get("op") in ("add", "update", "delete") and self._knowledge_graph is not None:
-                    for old in self._knowledge_graph.ingest_memory(fact, scope):
+                    for old in await self._knowledge_graph.aingest_memory(fact, scope):
                         if old != fact["id"]:
                             self._storage._invalidate(old, superseded_by_id=fact["id"], reason="graph_conflict")
             if self._graph is not None:
@@ -828,6 +834,17 @@ class MemoryEngine:
         self._ensure_components()
         scope = Scope(self.config.memory.namespace, self._canonical(user_id or current_user()))
         return self._knowledge_graph.relations(scope)
+
+    def merge_entities(self, duplicate: Any, into: Any, user_id: Optional[str] = None) -> bool:
+        """
+        Merge two of a user's entities (names or ids), e.g. after a wrong split: the
+        duplicate's names become aliases and its edges move to ``into``.
+        """
+        self._ensure_components()
+        scope = Scope(self.config.memory.namespace, self._canonical(user_id or current_user()))
+        kg = self._knowledge_graph
+        dup, keep = kg.find_entity(duplicate, scope), kg.find_entity(into, scope)
+        return dup is not None and keep is not None and kg.merge_entities(dup, keep, scope, source="user")
 
     async def consolidate(self) -> Dict[str, Any]:
         """Run one consolidation pass now (importance, contradictions, idle episodes)."""

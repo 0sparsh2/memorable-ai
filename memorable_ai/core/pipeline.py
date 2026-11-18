@@ -252,7 +252,8 @@ class WritePipeline:
         for fact in applied:
             if fact.get("op") not in ("add", "update", "delete"):
                 continue
-            retired = self.knowledge_graph.ingest_memory(fact, scope)
+            ingest = getattr(self.knowledge_graph, "aingest_memory", None)
+            retired = (await ingest(fact, scope)) if ingest else self.knowledge_graph.ingest_memory(fact, scope)
             for old_id in retired:
                 if old_id == fact["id"]:
                     continue

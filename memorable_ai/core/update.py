@@ -166,20 +166,31 @@ class MemoryUpdater:
         self, fact: Dict[str, Any], candidates: List[Tuple[Dict[str, Any], float]]
     ) -> Optional[int]:
         """Same subject + single-valued predicate + different object => conflict."""
-        from memorable_ai.graph.knowledge_graph import FUNCTIONAL_PREDICATES, KnowledgeGraph, normalize_entity
+        from memorable_ai.graph.knowledge_graph import KnowledgeGraph, normalize_entity
+        from memorable_ai.graph.ontology import default_ontology
 
-        functional = getattr(self.knowledge_graph, "functional", FUNCTIONAL_PREDICATES)
-        _, new_rels = KnowledgeGraph.extract(fact["content"])
-        new_keys = {
-            (normalize_entity(s), p): normalize_entity(o) for s, p, o in new_rels if p in functional
-        }
+        ont = getattr(self.knowledge_graph, "ontology", None) or default_ontology()
+
+        def keys(content: str) -> Dict[Tuple[str, str], str]:
+            """(subject, functional predicate) -> object; symmetric ones keyed from both ends."""
+            out: Dict[Tuple[str, str], str] = {}
+            for s, p, o in KnowledgeGraph.extract(content)[1]:
+                r = ont.resolve(p)
+                if not ont.is_functional(r.name):
+                    continue
+                s, o = (o, s) if r.swap else (s, o)
+                s, o = normalize_entity(s), normalize_entity(o)
+                out[(s, r.name)] = o
+                if ont.is_symmetric(r.name):
+                    out[(o, r.name)] = s
+            return out
+
+        new_keys = keys(fact["content"])
         if not new_keys:
             return None
         for mem, _ in candidates:
-            _, old_rels = KnowledgeGraph.extract(mem["content"])
-            for s, p, o in old_rels:
-                key = (normalize_entity(s), p)
-                if key in new_keys and new_keys[key] != normalize_entity(o):
+            for key, o in keys(mem["content"]).items():
+                if key in new_keys and new_keys[key] != o:
                     return mem["id"]
         return None
 

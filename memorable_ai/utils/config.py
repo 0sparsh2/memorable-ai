@@ -163,6 +163,11 @@ class MemoryConfig(BaseModel):
     )
     episodic: EpisodicConfig = Field(default_factory=EpisodicConfig)
     capture: CaptureConfig = Field(default_factory=CaptureConfig)
+    entity_resolution_llm: bool = Field(
+        default=True,
+        description="Ask the LLM (when one is configured) which entity an ambiguous name means; "
+        "otherwise only the deterministic rules run",
+    )
     write_mode: str = Field(
         default="background",
         description="'background' (writes run on a worker thread, off the request path) or 'sync'",

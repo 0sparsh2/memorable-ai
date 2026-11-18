@@ -28,7 +28,7 @@ Mechanics:
     loaded into the view, so isolation holds by construction.
   * Typed weights: ``A = sum_k w_k * A_k`` over edge kinds, cached per weight
     profile. ``DEFAULT_WEIGHTS`` keeps v0.2 behaviour (entity-entity + fact-entity
-    only). The multi-layer profiles come in G2.
+    only, plus G1 ``alias_of`` merge links). The multi-layer profiles come in G2.
   * Masking: excluded nodes (e.g. the user's own "self" hub) are removed exactly.
     Degrees are recomputed on the induced subgraph (``deg = A @ mask``).
   * Exact float32 power iteration by default. Forward local push (Andersen,
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 NodeKey = Tuple[str, int]
 
 # G0 parity with v0.2 retrieval: walk entity<->entity relations and fact<->entity links.
-DEFAULT_WEIGHTS: Dict[str, float] = {"relates": 1.0, "about": 1.0}
+DEFAULT_WEIGHTS: Dict[str, float] = {"relates": 1.0, "about": 1.0, "alias_of": 1.0}
 
 
 _KIND_CODES: Dict[str, int] = {}

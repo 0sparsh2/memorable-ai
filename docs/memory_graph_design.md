@@ -200,6 +200,26 @@ Every node and edge carries a tier: **`user`** (private; `user_id` set) or **`or
 
 **Ontology.** Entity types to start: `person, organization, place, project, service, tool, file, product, event, concept`. The predicate registry is seeded from today's `FUNCTIONAL_PREDICATES` and `_REL_PATTERNS`. Unknown predicates are allowed but flagged `custom`; dreaming clusters them and folds them into canonical ones. Applications can register their own types and predicates, as in Graphiti custom types and Cognee ontologies.
 
+### 4.1 G1 as built (2026-11-18)
+
+**Registry** ([ontology.py](../memorable_ai/graph/ontology.py)). 37 predicates with aliases, plus the `favorite_<thing>` family (single-valued). `resolve()` maps a raw predicate to `(canonical, swap, known)`. Inverses swap the ends (`child_of` → `parent_of`). Symmetric predicates are stored once with the user first. Domain and range only flag a contradiction between specific types (`works_at` → a place): the edge is kept with confidence 0.6 and `extra.type_mismatch`. Person relations carry role words for each end, so "my mother" follows `(Ann)-parent_of->(User)` and "my daughter" follows `(User)-parent_of->(Leo)`. The extractor's own word is kept on the edge (`extra.raw`, `extra.role`, `extra.role_end`) and scores above the generic group (0.8 vs 0.6 seed weight): "sister" stays more specific than "sibling".
+
+**Resolution** ([resolution.py](../memorable_ai/graph/resolution.py)). Rules first; an LLM only for leftovers:
+
+| Step | Rule |
+|---|---|
+| Candidates | exact `norm_name`; `entity_aliases`; person names whose first token matches or is a nickname variant (a 75-group table), with the same last name when both have one. A surname one edit away ("Sliva") is a *fuzzy* candidate that only an LLM may link |
+| Link | a unique exact match; otherwise a single alias / nickname / partial candidate. The fuller name becomes the display name and the shorter one an alias |
+| Reject | a kinship conflict: sibling, partner, parent and child are exclusive between the same two people, so "my daughter Ana" is not the sister Ana. This settles the "same name, different person" case without a model |
+| Context | among several candidates: +3 for the same relation to the same entity, +2 per relation to the fact's other entities, +1 per fact mentioning both (each capped). A unique best wins |
+| Uncertain | one batched JSON call per fact (`memory.entity_resolution_llm`, default on when an LLM is configured), run by `aingest_memory` before the write, with each candidate's summary. Without it: the most recent exact match, else a new entity. A split is cheap to merge later; a wrong merge corrupts facts |
+
+**Summaries.** A fact sheet rendered from the entity's newest 12 valid relations and its aliases, refreshed on every write that touches it. No LLM: it is always current and costs nothing. LLM-written summaries move to dreaming (G4).
+
+**Merges.** `merge_entities` moves edges to the kept entity (marked `extra.merged_from`, so a merge can be undone), turns the duplicate's names into aliases, sets `merged_into_id` and writes an `alias_of` edge. Lookups follow merges.
+
+**Deferred.** Embedding candidates (name + summary vectors) wait for G2, which embeds entities for query seeding anyway. Until then near-synonyms like "NYC" and "New York City" need an alias, an LLM extraction that names them the same way, or a merge.
+
 ## 5. Read path
 
 1. **Seeds:**
@@ -254,7 +274,7 @@ The circuit breaker and `model="none"` keep working, so tests stay LLM-free with
 | Phase | Deliverable | Testable by |
 |---|---|---|
 | **G0 Edge table, engine & provenance** ✅ done 2026-11-15 | `edges` + `GraphStore`; the CSR `GraphEngine` (watermark sync, exact float32 PPR, push fallback); migration of relations/mentions; `derived_from` / `part_of` / `next` written by the existing pipeline; `user`/`org` tiers; `agent_id` on scope | existing 113 tests stay green; provenance and cascade tests; `ppr_engines.py` shows the speed-up |
-| **G1 Ontology & resolution** | Type and predicate registry, registry-guided LLM extraction, entity resolution, entity summaries, `alias_of` | mocked-LLM tests; resolution fixtures (same name, different person; nicknames) |
+| **G1 Ontology & resolution** ✅ done 2026-11-18 (§4.1) | Type and predicate registry, registry-guided LLM extraction, entity resolution, entity summaries, `alias_of` | mocked-LLM tests; resolution fixtures (same name, different person; nicknames) |
 | **G2 Multi-layer graph retrieval** | Typed PPR producing per-kind lists, entity cards in L4, `as_of` queries | retrieval unit tests; LoCoMo retrieval eval when evals resume |
 | **G3 Procedural subgraph** | Procedural P2–P4 write and read through `edges` | procedural golden traces |
 | **G4 Dreaming on the graph** | Communities, insights, predicate canonicalisation, fact re-verification | mocked-LLM tests |

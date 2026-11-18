@@ -33,6 +33,7 @@ from memorable_ai.core.models import (  # noqa: F401  (re-exported for compatibi
     Counter,
     Edge,
     Entity,
+    EntityAlias,
     Episode,
     IdentityAlias,
     MemorableMeta,
@@ -236,6 +237,17 @@ class Storage:
                         except Exception as e:
                             conn.rollback()
                             logger.debug("Migration skip turns.%s: %s", col, e)
+            if "entities" in tables:  # G1: entity summaries and merges
+                ent_cols = {c["name"] for c in insp.get_columns("entities")}
+                for col, col_type in [("summary", "TEXT"), ("summary_updated_at", "TIMESTAMP"),
+                                      ("merged_into_id", "INTEGER")]:
+                    if col not in ent_cols:
+                        try:
+                            conn.execute(text(f"ALTER TABLE entities ADD COLUMN {col} {col_type}"))
+                            conn.commit()
+                        except Exception as e:
+                            conn.rollback()
+                            logger.debug("Migration skip entities.%s: %s", col, e)
             for table in ("turns", "episodes", "sessions", "entities"):
                 if table not in tables:
                     continue
@@ -981,6 +993,11 @@ class Storage:
                 counts[name] = len(ids)
                 if ids:
                     session.query(model).filter(model.id.in_(ids)).delete(synchronize_session=False)
+            counts["entity_aliases"] = (
+                self._ns_filter(session.query(EntityAlias), EntityAlias)
+                .filter(EntityAlias.user_id == user_id)
+                .delete(synchronize_session=False)
+            )
             counts["sessions"] = (
                 self._ns_filter(session.query(SessionRecord), SessionRecord)
                 .filter(SessionRecord.user_id == user_id)

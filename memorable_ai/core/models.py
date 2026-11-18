@@ -248,8 +248,29 @@ class Entity(Base):
     first_seen = Column(DateTime, default=utcnow)
     last_seen = Column(DateTime, default=utcnow)
     extra_metadata = Column(JSON, nullable=True)
+    # G1: a fact sheet rendered from the entity's valid relations (no LLM), refreshed on write
+    summary = Column(Text, nullable=True)
+    summary_updated_at = Column(DateTime, nullable=True)
+    # Set when this entity was merged into another (an ``alias_of`` edge records the merge)
+    merged_into_id = Column(Integer, nullable=True)
 
     __table_args__ = (Index("idx_entity_scope_name", "namespace", "user_id", "norm_name"),)
+
+
+class EntityAlias(Base):
+    """Another surface form of an entity ("Bob" for "Robert Chen"), used by entity resolution."""
+
+    __tablename__ = "entity_aliases"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    namespace = Column(String(255), nullable=True)
+    user_id = Column(String(255), nullable=True)
+    entity_id = Column(Integer, nullable=False, index=True)
+    alias = Column(String(255), nullable=False)  # normalised, as Entity.norm_name
+    source = Column(String(16), nullable=True)  # surface | nickname | partial | llm | merge | user
+    created_at = Column(DateTime, default=utcnow)
+
+    __table_args__ = (Index("idx_entity_alias_scope", "namespace", "user_id", "alias"),)
 
 
 # Node kinds addressed by edges. Each maps to a table above (or a later layer).
