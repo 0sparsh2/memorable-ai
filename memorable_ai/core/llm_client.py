@@ -96,6 +96,7 @@ async def acompletion(
         configure_litellm_env,
         default_timeout_seconds,
         is_nim_model,
+        request_defaults,
     )
 
     if is_nim_model(model):
@@ -110,6 +111,9 @@ async def acompletion(
     }
     if timeout:
         call_kwargs["timeout"] = timeout
+    if is_nim_model(model):
+        for k, v in request_defaults(model).items():
+            call_kwargs.setdefault(k, v)
     if api_key and not is_nim_model(model):
         call_kwargs["api_key"] = api_key
 

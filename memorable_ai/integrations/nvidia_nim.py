@@ -52,6 +52,20 @@ SLOW_MODELS: List[str] = [
 
 DEFAULT_MEMORY_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
 
+# Models that think before answering unless told not to. Memory jobs (extraction, update,
+# summaries, entity resolution) want short structured output: thinking costs 10-25x the
+# latency (measured 2-5 s vs 0.2 s) and can use up max_tokens before any JSON is written,
+# which the pipeline would read as "nothing to remember". MEMORABLE_LLM__THINKING=on keeps it.
+THINKING_BY_DEFAULT = {"nvidia/nemotron-3.5-lightning-30b-a3b"}
+
+
+def request_defaults(model: str) -> Dict[str, object]:
+    """Extra request fields for a NIM model (merged under the caller's own)."""
+    if to_nim_model_id(model) in THINKING_BY_DEFAULT and os.getenv(
+            "MEMORABLE_LLM__THINKING", "off").strip().lower() not in ("on", "1", "true"):
+        return {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+    return {}
+
 
 def is_nim_model(model: str) -> bool:
     """True if model id targets NVIDIA NIM (LiteLLM or raw NIM id)."""

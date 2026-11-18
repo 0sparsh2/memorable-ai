@@ -1,3 +1,5 @@
+import pytest
+
 from memorable_ai.integrations.nvidia_nim import (
     DEFAULT_MEMORY_MODEL,
     NIM_LLM_MODELS,
@@ -48,3 +50,32 @@ def test_resolve_memory_model_defaults_to_live_model(monkeypatch):
     monkeypatch.delenv("NVIDIA_MODEL", raising=False)
     assert resolve_memory_model() == f"nvidia_nim/{DEFAULT_MEMORY_MODEL}"
     assert resolve_memory_model("gemini/gemini-3-flash-preview") == "gemini/gemini-3-flash-preview"
+
+
+@pytest.mark.asyncio
+async def test_memory_jobs_turn_thinking_off_on_reasoning_models(monkeypatch):
+    """Lightning thinks by default; extraction must not spend max_tokens on thinking."""
+    import litellm
+
+    from memorable_ai.core import llm_client
+
+    seen = []
+
+    async def fake(**kw):
+        seen.append(kw)
+        return {"choices": [{"message": {"content": "[]"}}]}
+
+    monkeypatch.setattr(litellm, "acompletion", fake)
+    monkeypatch.delenv("MEMORABLE_LLM__THINKING", raising=False)
+    llm_client.reset_circuit_breaker()
+    await llm_client.acompletion("nvidia_nim/nvidia/nemotron-3.5-lightning-30b-a3b",
+                                 [{"role": "user", "content": "x"}], max_tokens=10)
+    assert seen[-1]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    await llm_client.acompletion("nvidia_nim/nvidia/nemotron-3.5-bolt-e4b", [{"role": "user", "content": "x"}])
+    assert "extra_body" not in seen[-1], "models that answer directly get no extra fields"
+    await llm_client.acompletion("nvidia_nim/nvidia/nemotron-3.5-lightning-30b-a3b", [{"role": "user", "content": "x"}],
+                                 extra_body={"custom": 1})
+    assert seen[-1]["extra_body"] == {"custom": 1}, "the caller's own fields win"
+    monkeypatch.setenv("MEMORABLE_LLM__THINKING", "on")
+    await llm_client.acompletion("nvidia_nim/nvidia/nemotron-3.5-lightning-30b-a3b", [{"role": "user", "content": "x"}])
+    assert "extra_body" not in seen[-1]

@@ -75,6 +75,7 @@ Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instru
 - Python 3.10+ is required. 3.8 and 3.9 are past end of life, and current numpy, sentence-transformers and onnxruntime need 3.10+. CI now tests 3.10–3.14 with current GitHub Actions.
 
 ### Fixed
+- Memory jobs on the default NIM model (Nemotron-3.5-Lightning, the default since 2026-11-16) ran with its thinking mode on. Thinking takes 10–25× longer, and can use up `max_tokens` before any JSON is written, which extraction reads as "nothing to remember". NIM models that think by default now get `chat_template_kwargs.enable_thinking=false` unless the caller sets its own `extra_body`; `MEMORABLE_LLM__THINKING=on` keeps thinking.
 - `forget_user()` left the user's procedural `tasks` rows behind (found while building G1). It now deletes them, and the new entity aliases too.
 
 ### Fixed (found by the G0 deep evaluation, `docs/g0_deep_evaluation.md`)
