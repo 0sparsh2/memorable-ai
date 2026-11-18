@@ -84,9 +84,15 @@ def load():
              else sorted(glob.glob("/kaggle/input/**/qgen*.jsonl", recursive=True)))
     if not paths:
         raise SystemExit("qgen.jsonl not found under /kaggle/input")
-    convs = []
+    convs, seen = [], set()
     for path in paths:  # every qgen*.jsonl found (Kaggle generation, salvaged chunks, NIM generation)
-        convs += [json.loads(line) for line in open(path)]
+        for line in open(path):
+            c = json.loads(line)
+            key = (c["turns"][0]["text"][:200], c["turns"][-1]["text"][:200]) if c.get("turns") else c.get("cid")
+            if key in seen:  # the same source conversation generated twice: keep the first
+                continue
+            seen.add(key)
+            convs.append(c)
     for c in convs:  # generators sometimes write a statement instead of a question
         c["questions"] = [q for q in c.get("questions") or [] if "?" in q["q"]]
     convs = [c for c in convs if c["questions"] and len(c["turns"]) >= 4]
