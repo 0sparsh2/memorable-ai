@@ -19,35 +19,40 @@ NIM_API_BASE = "https://integrate.api.nvidia.com/v1"
 NIM_CHAT_COMPLETIONS_PATH = "/chat/completions"
 LITELLM_PROVIDER_PREFIX = "nvidia_nim/"
 
-# Chat models checked against integrate.api.nvidia.com on 2026-11-16 (free tier). NIM retires
-# models often: deepseek-v4-flash (the old default), llama-3.1-8b and others now return 410
-# Gone, and several listed models return 404. `fetch_available_models()` lists what is live.
+# Chat models checked against integrate.api.nvidia.com on 2026-11-18 (free tier: /v1/models plus
+# one probe per model, a short dated question). NIM retires models often: deepseek-v4-flash and
+# deepseek-v4.1-flash, llama-3.1-8b, gpt-oss-20b and others now return 410 Gone or are no longer
+# listed. `fetch_available_models()` lists what is live.
 NIM_LLM_MODELS: Dict[str, str] = {
     # measured: correct answers, 0.2-6 s per call; reasons by default (chat_template_kwargs.enable_thinking)
     "nvidia/nemotron-3.5-lightning-30b-a3b": "Default: fast MoE (3B active), reasoning on by default",
     # measured: 4-7 s for ~500 output tokens, thinking off
     "nvidia/nemotron-3.5-bolt-e4b": "Fast small model; good for short structured generation",
-    # measured: correct, but the free tier queues it (110-500 s per call)
-    "deepseek-ai/deepseek-v4.1-flash": "Strong; slow on the free tier",
-    # listed on /v1/models on 2026-11-16, not measured
-    "nvidia/nemotron-3-ultra-550b-a55b": "Largest Nemotron (listed)",
-    "mistralai/mistral-large-4-1t-a52b": "Mistral Large 4 (listed)",
-    "z-ai/glm-5.3-flash": "GLM flash (listed; timed out on the free tier)",
-    "google/gemma-4-31b-it": "Gemma 4 31B (listed; timed out on the free tier)",
-    "openai/gpt-oss-20b": "Open-weight 20B (listed; timed out on the free tier)",
+    # measured 2026-11-18: 2.7 s with thinking (correct); 2.1 s without (wrong on the probe)
+    "nvidia/nemotron-3-ultra-550b-a55b": "Largest Nemotron (55B active, 1M context); fast on the free tier",
+    # measured 2026-11-18: 8.3 s, correct; reasons even with enable_thinking=false
+    "mistralai/mistral-large-4-1t-a52b": "Mistral Large 4 (52B active); always reasons",
+    # measured 2026-11-18: correct, but the free tier queues them (60-190 s per call)
+    "moonshotai/kimi-k3.1-pro": "Kimi K3.1 Pro (104B active, 1M context); slow on the free tier",
+    "minimaxai/minimax-m3.1-flash": "MiniMax M3.1 Flash; slow on the free tier",
+    "stepfun-ai/step-5-preview": "Step 5 preview; slow on the free tier",
+    # timed out (> 240 s) on 2026-11-16 and 2026-11-18
+    "z-ai/glm-5.3-flash": "GLM-5.3 Flash (18B active, 1M context); times out on the free tier",
+    "google/gemma-4-31b-it": "Gemma 4 31B (listed; timed out on the free tier 2026-11-16)",
 }
 
 # Defaults for Memorable memory pipeline (extraction / update / summary)
 RECOMMENDED_MEMORY_MODELS: List[str] = [
     "nvidia/nemotron-3.5-lightning-30b-a3b",
     "nvidia/nemotron-3.5-bolt-e4b",
-    "deepseek-ai/deepseek-v4.1-flash",
+    "nvidia/nemotron-3-ultra-550b-a55b",
 ]
 
 SLOW_MODELS: List[str] = [
-    "deepseek-ai/deepseek-v4.1-flash",
-    "nvidia/nemotron-3-ultra-550b-a55b",
-    "mistralai/mistral-large-4-1t-a52b",
+    "moonshotai/kimi-k3.1-pro",
+    "minimaxai/minimax-m3.1-flash",
+    "stepfun-ai/step-5-preview",
+    "z-ai/glm-5.3-flash",
 ]
 
 DEFAULT_MEMORY_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
