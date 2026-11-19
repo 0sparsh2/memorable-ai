@@ -1,6 +1,6 @@
 # Observation log: design note (2026-11-19)
 
-**Status:** built (commit aee0fd1, opt-in) and under test as arm A7 of [prereg v6](../benchmarks/qa/eval_plan/prereg-v6.md), frozen 2026-11-19. The batched observer below is built too, and not yet measured end to end.
+**Status:** built (commit aee0fd1, opt-in) and under test as arm A7 of [prereg v6](../benchmarks/qa/eval_plan/prereg-v6.md), frozen 2026-11-19. The batched observer below is built too; it lost detail on its first measurement.
 
 ## Why
 
@@ -38,7 +38,7 @@ NIM's free tier limits requests per model (about 4–6 a minute sustained), not 
 - **Setting:** `observe_batch_tokens = 0` (the default) keeps one call per episode. With N > 0, a closed episode joins a queue (`observe_pending` in its metadata), and once the queued messages reach N tokens one call observes them all. `MemoryEngine.flush_observations(user_id)` observes what is left: after a bulk import, or when a user's conversations are over.
 - **Prompt:** messages are grouped under their dates, and each observation is dated by the first message it cites, so a batch that spans weeks still dates every line. The call also sees the latest ~1.5k tokens of the log, so it can say what changed instead of repeating it.
 - **Cost:** the timeout grows with the output budget (16k tokens, up to 400 s), because one call now writes what 20 calls wrote.
-- **Unmeasured so far:** whether a large batch keeps the detail of per-episode calls. `benchmarks/qa/observer_batch.py` compares them on LoCoMo-dev without answers (evidence cited, short answers contained, log size); the answer-level test is an arm beside A7 once v6 has reported.
+- **Measured on conv-48 (2026-11-19), without answers: it loses detail.** Given 8–20k tokens of messages at once, Ultra wrote 94–129 observations against 393 one episode at a time, far inside its output budget. The log cited all the gold evidence for 57.6–74.9% of questions (per episode: 94.8%) and held the short answer in one line for 36.0–48.6% (65.8%). Prereg v6.1's rule picked no batch size, so it stays opt-in and off, and v6 and the final runs observe per episode. The numbers are in `prereg-v6.1.md`.
 
 ## The eval arm (preregistered as v6)
 

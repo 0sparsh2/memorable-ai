@@ -1,6 +1,15 @@
 # Preregistration v6.1 (DRAFT): the batched observer
 
-**Status:** draft, 2026-11-19. A sister eval to [prereg v6](prereg-v6.md), whose arms, settings and answers it leaves untouched; it shares v6's answer model, judge and answer loop. It freezes when its pilot starts.
+**Status:** not run (2026-11-19). Its own rule for the batch size picked none: on conv-48, without answers, every batched log fell far short of the per-episode log (below). The rule was fixed in this draft before the measurement ran (commit 232557f).
+
+| conv-48 log | Calls | Observations | Log tokens | Evidence cited (all) | Answer contained (111) | Rule |
+|---|---|---|---|---|---|---|
+| Per episode (v6's A7) | 46 | 393 | 10.8k | 94.8% | 65.8% | baseline |
+| T = 8,000 | 3 | 94 | 3.6k | 57.6% | 36.0% | fails |
+| T = 12,000 | 2 | 111 | 4.2k | 74.9% | 48.6% | fails |
+| T = 20,000 | 2 | 129 | 4.1k | 74.9% | 45.9% | fails |
+
+No reply reached its output budget (7.8–10.1k output tokens against 21–31k allowed): given a large batch, the observer summarises instead of recording.
 
 **Why.** NIM's free tier limits requests per model (about 4–6 a minute sustained), not tokens. v6's observer makes one call per closed episode, about 55 calls per LongMemEval haystack. Observing the 350 held-out haystacks for a final claim would take about 19k calls, or 53 hours on Ultra. Mastra's observer makes one call per ~30k tokens of unobserved messages; at that size the same work is about 1.4k calls, or 4 hours. The batched observer is built (`extraction.observe_batch_tokens`, commit 88dfa98). v6.1 asks whether it keeps the answers.
 

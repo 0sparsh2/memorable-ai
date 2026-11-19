@@ -74,3 +74,47 @@ Note: the 3,487 s ingest is the machine, not G2. During this run swap was 21.8 o
 | A3w current, 40 turns | 68.7 [65–72] | — | 74.3 [67–81] | 723 / 2040 |
 
 Published (self-reported, other answer models): best LoCoMo 93.6 (Agent Zero Memory), best LongMemEval 95.6 (Agent Zero Memory); Zep 81.5 / 71.2. Full table: `python -m benchmarks.qa.compare`.
+
+## 2026-11-19: Observer pilot and batched observer (commit 232557f)
+
+Retrieval, LoCoMo (1536 questions, 10 conversations, no LLM):
+
+| Signal | recall@5 | vs previous milestone (paired) |
+|---|---|---|
+| turn/pipeline | 0.701 | unchanged |
+| turn/recall | 0.68 | +0.4 pts (CI -0.4…+1.2) |
+| episode/fused | 0.575 | unchanged |
+| fact/graph | 0.018 | unchanged |
+| fact/pipeline | 0.059 | unchanged |
+
+Ingest 50.1 s wall / 172.8 s CPU, query p50 34.4 ms; graph: 756 entities, 113 relations (previous: 3487.6 s, 32.2 ms).
+
+| QA arm | LoCoMo J-strict | LoCoMo J-lenient | LongMemEval J | answered / queued |
+|---|---|---|---|---|
+| A0 full context | 70.9 [67–75] | 92.4 [90–95] | 53.3 [37–70] | 580 / 1639 |
+| A1 BM25 only | 53.0 [49–57] | — | 70.7 [64–77] | 761 / 2040 |
+| A2 v0.3 (RRF) | 61.0 [57–65] | — | 72.8 [66–80] | 694 / 2040 |
+| A3 current (score fusion + Ettin-17M) | 66.9 [63–71] | 84.1 [81–87] | 74.7 [68–81] | 717 / 2040 |
+| A3w current, 40 turns | 69.1 [66–73] | — | 75.3 [69–81] | 758 / 2040 |
+| A4 current + fine-tuned MiniLM | 63.9 [47–81] | 80.6 [67–92] | 93.3 [80–100] | 51 / 2040 |
+| A5 current + 20 LLM facts | 75.0 [50–100] | 75.0 [50–100] | — | 8 / 500 |
+| A6 current, 80 turns | 77.8 [44–100] | — | — | 9 / 500 |
+| D5 decoy: another conversation's facts | 0.0 [0–0] | — | — | 1 / 100 |
+
+Published (self-reported, other answer models): best LoCoMo 93.6 (Agent Zero Memory), best LongMemEval 95.6 (Agent Zero Memory); Zep 81.5 / 71.2. Full table: `python -m benchmarks.qa.compare`.
+
+Notes:
+- `turn/recall` +0.4 pts (CI −0.4…+1.2): no measurable change from the chat-opener filter and the backfill for episode-named entities (a4e6107, 33ecb73) on LLM-free graphs. The filter removed 151 junk entities (907 → 756). Ingest 50.1 s wall, 172.8 s CPU (embedding is multithreaded); the previous entry's 3,487 s was a swap stall.
+- QA rows are interim (the v3 loop is paused while prereg v5 runs). A4, A5, A6 and D5 have fewer than 60 answers each, so their intervals are wide. Reporting only.
+
+**Observation log (prereg v6 observer pilot; dev rows; no answers yet, so these are proxies):**
+
+| Context for LoCoMo conv-48 (191 questions with evidence) | All gold evidence in context / cited | Short answer in one line (111) | Tokens |
+|---|---|---|---|
+| A3g: top 10 turns + 3 episodes (LLM-free ingest) | 63.4% (all@10, `docs/g2_results.md`) | — | ~0.8k |
+| **A7 log, one Ultra call per episode (46 calls)** | **94.8%** | **65.8%** | 10.8k |
+| Batched observer, 12k tokens per call (2 calls) | 74.9% | 48.6% | 4.2k |
+| Batched observer, 8k / 20k (3 / 2 calls) | 57.6% / 74.9% | 36.0% / 45.9% | 3.6k / 4.1k |
+
+- On 5 LongMemEval-dev haystacks (all single-session-user), the per-episode log is 25–26.5k tokens, the size Mastra reports for its LongMemEval contexts (~30k; Mastra 94.9 with gpt-5-mini). All 5 logs cite the evidence turn and hold the answer.
+- **The batched observer loses detail.** Given 8–20k tokens of messages at once, Ultra wrote about a quarter as many observations per message as it does one episode at a time (94–129 against 393), well inside its output budget. Prereg v6.1's rule (within 3 points on evidence cited, 5 on answers contained) picks no batch size, so v6.1 is not run.
