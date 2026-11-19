@@ -65,6 +65,8 @@ class WritePipeline:
         context_window: int = 6,
         legacy_log: bool = True,
         tasks: Optional[Any] = None,
+        facts: bool = True,
+        observations: bool = False,
     ):
         self.storage = storage
         self.extractor = extractor
@@ -76,6 +78,8 @@ class WritePipeline:
         self.context_window = context_window
         self.legacy_log = legacy_log
         self.tasks = tasks  # TaskTracker (procedural P1b)
+        self.facts = facts  # fact extraction on (off: only the observer writes memories)
+        self.observations = observations  # the observer at episode close (docs/observation_memory.md)
 
     async def ingest(
         self,
@@ -110,7 +114,7 @@ class WritePipeline:
         # Facts come from conversation; tool calls/results feed tasks and procedures instead.
         msg_turns = [t for t in res.new_turns if t.get("kind", "message") == "message"]
 
-        if self.timing == "turn" and msg_turns:
+        if self.timing == "turn" and msg_turns and self.facts:
             context = self.episodic.recent_turns(
                 scope, limit=self.context_window, before_seq=msg_turns[0]["seq"]
             )
@@ -218,7 +222,9 @@ class WritePipeline:
                 await self.summary_store.fold_episode(scope.session_id, ep)
             except Exception as e:
                 logger.debug("Session summary update failed: %s", e)
-        if self.timing == "episode":
+        if self.observations:
+            await self._observe(episode_id, scope, report)
+        if self.timing == "episode" and self.facts:
             turns = self.episodic.episode_turns(episode_id)
             for t in turns:
                 if isinstance(t.get("occurred_at"), str):
@@ -235,6 +241,37 @@ class WritePipeline:
                     turn_ids=[t["id"] for t in turns if t["role"] == "user"],
                 )
             )
+
+    async def _observe(self, episode_id: int, scope: Scope, report: IngestReport) -> None:
+        """Observer: dated observations of the closed episode, appended to the log (no update phase:
+        a log keeps what was true when, and later observations say what changed)."""
+        observe = getattr(self.extractor, "observe", None)
+        if observe is None:
+            return
+        # stored turn dicts carry the layer in "kind" and the message kind in "event_kind"
+        turns = [t for t in self.episodic.episode_turns(episode_id) if t.get("event_kind", "message") == "message"]
+        for t in turns:
+            if isinstance(t.get("occurred_at"), str):
+                t["occurred_at"] = datetime.fromisoformat(t["occurred_at"])
+        try:
+            obs = await observe(turns, session_summary=await self._summary(scope),
+                                session_date=turns[0]["occurred_at"] if turns else None,
+                                user_name=self._user_name(scope))
+        except Exception as e:  # noqa: BLE001 - the log is additive; recording must not fail on it
+            logger.warning("Observer failed for episode %s: %s", episode_id, e)
+            return
+        for o in obs:
+            o.update(user_id=scope.user_id, session_id=scope.session_id, source="conversation",
+                     source_episode_id=episode_id)
+            if scope.agent_id:
+                o.setdefault("agent_id", scope.agent_id)
+            stored = self.updater._add(o)
+            if stored.get("op") != "add":
+                continue
+            report.facts.append(stored)
+            if self.knowledge_graph is not None:
+                ingest = getattr(self.knowledge_graph, "aingest_memory", None)
+                await ingest(stored, scope) if ingest else self.knowledge_graph.ingest_memory(stored, scope)
 
     async def _apply(
         self,

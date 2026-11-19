@@ -47,3 +47,4 @@ The cap is 4 days and the cost is $0. The v3 answer loop is paused for the run.
 ## Approval
 
 On 2026-11-19 the owner approved the full run with all three readers, as preregistered. It started at 2026-11-19 11:06 EST (`runs/v5`, answer-loop, concurrency 8, 6 rpm for the judge and 6 rpm per reader, 420 s HTTP timeout). The v3 answer loop was paused at 3,579 answers (complete lines; restart command in `runs/main/answer_loop.cmd.txt`) and resumes when v5 ends.
+- **Run restart, 2026-11-19 (operational).** The first chunk stopped on `RemoteProtocolError: Server disconnected` (Mistral). A dropped connection is the same transient class as a timeout, so the harness now retries it the same way. The loop was restarted from disk; no measurement setting changed.

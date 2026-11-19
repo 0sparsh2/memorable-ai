@@ -68,6 +68,7 @@ class HybridRetriever:
         profile_facts: int = 3,
         turn_embedding_model: Any = None,
         graph_turn_weight: float = 0.0,
+        observation_log_tokens: int = 0,
     ):
         from memorable_ai.core.embeddings import as_embedder, get_embedder
 
@@ -104,6 +105,7 @@ class HybridRetriever:
         self.max_excerpts = max_excerpts
         self.profile_facts = profile_facts
         self.graph_turn_weight = graph_turn_weight  # G2: typed graph walk as a turn signal (0 = off)
+        self.observation_log_tokens = observation_log_tokens  # budget of the observation log block (0 = off)
         self.context_builder = ContextBuilder(max_tokens=max_context_tokens)
 
     # ------------------------------------------------------------------ scope helpers
@@ -367,6 +369,15 @@ class HybridRetriever:
             result["excerpts"] = candidates[:k_excerpts]
         return result
 
+    async def observation_log(self, scope: Optional[Scope] = None, max_tokens: Optional[int] = None) -> str:
+        """The scope's observation log, rendered within ``max_tokens`` (docs/observation_memory.md)."""
+        from memorable_ai.core.context import render_observation_log
+
+        scope = self._scope(scope)
+        obs = await self.storage.get_memories(memory_type="observation", limit=100_000, scope_user=scope.user_id,
+                                              include_shared=self.include_shared)
+        return render_observation_log(obs, max_tokens if max_tokens is not None else self.observation_log_tokens)
+
     async def profile(self, scope: Optional[Scope] = None, limit: int = 8) -> List[Dict[str, Any]]:
         """Most important active facts for the user (stable "who is this user" block)."""
         scope = self._scope(scope)
@@ -411,8 +422,15 @@ class HybridRetriever:
             return self.context_builder.build(profile=prof)
         res = await self.recall(query, scope)
         facts = res["facts"]
+        log = await self.observation_log(scope) if self.observation_log_tokens > 0 and scope.user_id is not None else ""
+
+        def drop_logged(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            """The log already holds every observation; don't list them twice."""
+            return [f for f in items if f.get("type") != "observation"] if log else items
+
+        facts, prof = drop_logged(facts), drop_logged(prof)
         if not facts and not prof and _is_generic(query):
-            prof = await self.profile(scope, limit=self.max_facts)
+            prof = drop_logged(await self.profile(scope, limit=self.max_facts))
         if facts:
             self.storage.touch_memories([f["id"] for f in facts])
         return self.context_builder.build(
@@ -421,6 +439,7 @@ class HybridRetriever:
             excerpts=res["excerpts"],
             profile=prof,
             session_summary=session_summary,
+            observation_log=log,
         )
 
     async def search(

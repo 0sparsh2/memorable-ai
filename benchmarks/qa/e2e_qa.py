@@ -92,6 +92,20 @@ ARMS["A5x"] = dict(ARMS["A3"], k_facts=0, ingest="llm", subset="v4", check_only=
 ARMS["A6"] = dict(ARMS["A3"], k_excerpts=80, subset="v4")
 ARMS["D5"] = dict(ARMS["A5"], facts_from="other", subset="v4d")  # decoy: another conversation's facts
 LENIENT_ARMS.add("A5")
+
+# Arms built before G2 (2026-11-19) had no graph walk in turn ranking; pinning it off keeps a
+# rebuild of any of them byte-identical to its stored contexts.
+for _a in list(ARMS):
+    ARMS[_a].setdefault("graph_turn_weight", 0.0)
+# prereg v6 (observation log). A3g = A3 with current code (G2 walk on). A7 = A3g's turns and
+# episodes plus the observation log of a separate observer-only ingest, so A7 - A3g is the log
+# alone. D7 = A3g plus another conversation's log (decoy).
+OBSERVE_MODEL = os.getenv("E2E_QA_OBSERVE_MODEL", "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b")
+LOG_TOKENS = 30_000  # Mastra's LongMemEval runs averaged ~30k tokens of context
+ARMS["A3g"] = dict(ARMS["A3"], graph_turn_weight=1.0)
+ARMS["A7"] = dict(ARMS["A3g"], log_tokens=LOG_TOKENS)
+ARMS["D7"] = dict(ARMS["A7"], log_from="other")
+LENIENT_ARMS.update({"A3g", "A7"})
 _GROUP_ORDER: Dict[str, List[str]] = {}  # bench -> group ids, for D5's fixed derangement
 
 # prereg v5 (answer model): a context record may name a reader; the judge stays MODEL. Arms are
@@ -240,7 +254,7 @@ def _fact_date(f: Dict[str, Any]) -> Optional[datetime]:
 
 
 def memory_context(item: Dict[str, Any], turns: List[Dict[str, Any]], episodes: List[Dict[str, Any]],
-                   facts: Sequence[Dict[str, Any]] = ()) -> tuple:
+                   facts: Sequence[Dict[str, Any]] = (), log: str = "") -> tuple:
     """Oldest first, dated, no ranks or scores (as Mem0 presents memories)."""
     rows, cut = [], 0
     for f in facts:  # prereg v4 A5: LLM-extracted facts, dated by event or by when they were said
@@ -259,10 +273,13 @@ def memory_context(item: Dict[str, Any], turns: List[Dict[str, Any]], episodes: 
             text = f"{t.get('role')}: {text}"
         rows.append((dt or datetime.min, t.get("seq") or 0, _line(dt, text)))
     rows.sort(key=lambda r: (r[0], r[1]))
-    return "\n".join(r[2] for r in rows) or "(no memories found)", cut
+    body = "\n".join(r[2] for r in rows) or "(no memories found)"
+    if log:  # prereg v6 A7: the whole observation log first, then the retrieved excerpts
+        body = f"Observation log (oldest first):\n{log}\n\nRetrieved excerpts:\n{body}"
+    return body, cut
 
 
-def _engine(db: Path, embedding_model: Optional[str] = None, llm: bool = False):
+def _engine(db: Path, embedding_model: Optional[str] = None, llm: bool = False, observe: bool = False):
     from memorable_ai import MemoryEngine
 
     eng = MemoryEngine(database=f"sqlite:///{db}", write_mode="sync")
@@ -270,16 +287,22 @@ def _engine(db: Path, embedding_model: Optional[str] = None, llm: bool = False):
         eng.config.llm.embedding_model = embedding_model
     if llm:  # prereg v4 A5: extraction, update and entity resolution on the LLM
         eng.config.llm.default_model = EXTRACT_MODEL
+    if observe:  # prereg v6 A7: the observer only (one call per closed episode)
+        eng.config.llm.default_model = OBSERVE_MODEL
+        eng.config.memory.extraction.facts = False
+        eng.config.memory.extraction.observations = True
+        eng.config.memory.entity_resolution_llm = False
     eng._ensure_components()
-    if llm:  # episode and session summaries stay extractive, as in A3, so A5 - A3 is the facts alone
+    if llm or observe:  # episode and session summaries stay extractive, as in A3
         eng._episodic.llm_model = None
         eng._summary_store.llm_model = None
     return eng
 
 
-async def _ingest(item: Dict[str, Any], db: Path, embedding_model: Optional[str] = None, llm: bool = False):
-    eng = _engine(db, embedding_model, llm)
-    if llm and item["bench"] == "locomo":  # prereg v4.2: the harness feeds speaker A in as the user; name them
+async def _ingest(item: Dict[str, Any], db: Path, embedding_model: Optional[str] = None, llm: bool = False,
+                  observe: bool = False):
+    eng = _engine(db, embedding_model, llm, observe)
+    if (llm or observe) and item["bench"] == "locomo":  # prereg v4.2: the harness feeds speaker A in as the user; name them
         eng.set_user_name(item["_sample"]["conversation"].get("speaker_a"), user_id=item["group"])
     uid = item["group"]
     if item["bench"] == "locomo":
@@ -334,25 +357,26 @@ async def _contexts_for_group(group_items, arms, tmp: Path, out) -> Dict[str, An
     return stats
 
 
-async def _cached_engine(bench: str, group: str, item: Optional[Dict[str, Any]], embedder, stats=None):
+async def _cached_engine(bench: str, group: str, item: Optional[Dict[str, Any]], embedder, stats=None,
+                        mode: str = "llm"):
     """
     LLM ingests are kept under <run>/ingest_cache so a multi-day extraction resumes after a
     crash and every arm (and the decoy) reads the same facts. A ``.done`` marker means complete.
     """
     cache = _RUN_DIR[0] / "ingest_cache" / bench
     cache.mkdir(parents=True, exist_ok=True)
-    db = cache / f"{_safe(group)}.llm.db"
+    db = cache / f"{_safe(group)}.{mode}.db"  # mode: "llm" (A5 facts) or "obs" (A7 observer)
     done = db.with_suffix(".done")
     if done.exists():
-        return _engine(db, embedder, llm=True)
+        return _engine(db, embedder, llm=mode == "llm", observe=mode == "obs")
     if item is None:
-        raise SystemExit(f"no finished LLM ingest for {group}; run A5 before D5")
+        raise SystemExit(f"no finished {mode} ingest for {group}; build the arm before its decoy")
     for p in cache.glob(db.name + "*"):
         p.unlink()
     token = _LLM_GROUP.set(group)
     t0 = time.perf_counter()
     try:
-        eng = await _ingest(item, db, embedder, llm=True)
+        eng = await _ingest(item, db, embedder, llm=mode == "llm", observe=mode == "obs")
     finally:
         _LLM_GROUP.reset(token)
     if stats is not None:
@@ -377,7 +401,7 @@ async def _arm_contexts(group_items, embedder, mode, arm_list, tmp: Path, stats,
         stats["ingest_s"] += time.perf_counter() - t0
     r = eng._retrieval
     base = {k: getattr(r, k) for k in ("fusion", "semantic_weight", "bm25_weight", "rerank", "rerank_model",
-                                       "rerank_depth", "rerank_blend")}
+                                       "rerank_depth", "rerank_blend", "graph_turn_weight")}
     others = []
     try:
         for a in arm_list:
@@ -401,6 +425,14 @@ async def _arm_contexts(group_items, embedder, mode, arm_list, tmp: Path, stats,
                 for k, v in base.items():
                     setattr(fr, k, cfg.get(k, v))
                 fr._reranker = r._reranker
+            log_text = ""
+            if cfg.get("log_tokens"):  # prereg v6: the observation log of this (or, D7, the next) conversation
+                order = _GROUP_ORDER[bench]
+                lg = order[(order.index(group) + 1) % len(order)] if cfg.get("log_from") == "other" else group
+                log_eng = await _cached_engine(bench, lg, group_items[0] if lg == group else None, embedder,
+                                               stats, mode="obs")
+                others.append(log_eng)
+                log_text = await log_eng._retrieval.observation_log(Scope(user_id=lg), max_tokens=cfg["log_tokens"])
             sink = _CHECK_OUT[0] if cfg.get("check_only") else out
             for it in group_items:
                 if not _in_subset(a, it) or (a, it["qid"]) in _WRITTEN:
@@ -415,7 +447,7 @@ async def _arm_contexts(group_items, embedder, mode, arm_list, tmp: Path, stats,
                     facts = (await fact_eng._retrieval.recall(it["question"], Scope(user_id=fact_group),
                                                               k_facts=k_facts, k_episodes=0, k_excerpts=0))["facts"]
                 ms = 1000 * (time.perf_counter() - t)
-                ctx, cut = memory_context(it, res["excerpts"], res["episodes"], facts)
+                ctx, cut = memory_context(it, res["excerpts"], res["episodes"], facts, log=log_text)
                 stats["truncated_turns"] += cut
                 if not res["excerpts"] and not res["episodes"] and not facts:
                     stats["empty"][a] += 1
@@ -519,7 +551,7 @@ async def cmd_retrieve(args) -> None:
         for it in items:
             it["_subsets"] = {name for name, ids in subsets.items() if it["qid"] in ids}
     _RUN_DIR[:] = [run]
-    if any(ARMS[a].get("ingest") == "llm" for a in arms):
+    if any(ARMS[a].get("ingest") == "llm" or ARMS[a].get("log_tokens") for a in arms):  # A5 facts, A7 observer
         install_ingest_llm(args.llm_rpm)
     groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for it in items:
@@ -709,8 +741,10 @@ async def llm_call(prompt: str, *, system: Optional[str], effort: str, max_token
                 await asyncio.sleep(waits_429[n429])
                 n429 += 1
                 continue
-            if any(x in msg for x in ("503", "502", "500", "overloaded", "timeout", "timed out", "readtimeout")) \
-                    and nother < len(waits_other):
+            # transport failures (a dropped connection) are transient, like timeouts (prereg v5 run)
+            if any(x in msg for x in ("503", "502", "500", "overloaded", "timeout", "timed out", "readtimeout",
+                                      "disconnected", "remoteprotocol", "connecterror", "connection reset",
+                                      "readerror")) and nother < len(waits_other):
                 await asyncio.sleep(waits_other[nother])
                 nother += 1
                 continue

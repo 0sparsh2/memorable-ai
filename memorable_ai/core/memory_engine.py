@@ -247,6 +247,8 @@ class MemoryEngine:
             timing=ext_cfg.timing,
             context_window=ext_cfg.recent_window,
             tasks=self._tasks,
+            facts=ext_cfg.facts,
+            observations=ext_cfg.observations,
         )
         if cfg.graph.enabled and cfg.graph.connection_string:
             from memorable_ai.graph.builder import GraphBuilder
@@ -262,6 +264,7 @@ class MemoryEngine:
             entity_weight=rcfg.entity_weight,
             graph_weight=rcfg.graph_weight,
             graph_turn_weight=rcfg.graph_turn_weight,
+            observation_log_tokens=rcfg.observation_log_tokens,
             rrf_k=rcfg.rrf_k,
             min_semantic_score=rcfg.min_semantic_score,
             rerank=rcfg.rerank,

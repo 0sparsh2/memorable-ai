@@ -26,8 +26,9 @@ from memorable_ai.core.models import utcnow  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-MEMORY_TYPES = ("fact", "preference", "skill", "rule", "context")
-TYPE_IMPORTANCE = {"rule": 0.8, "preference": 0.6, "fact": 0.6, "skill": 0.5, "context": 0.4}
+MEMORY_TYPES = ("fact", "preference", "skill", "rule", "context", "observation")
+TYPE_IMPORTANCE = {"rule": 0.8, "preference": 0.6, "fact": 0.6, "skill": 0.5, "context": 0.4, "observation": 0.5}
+PRIORITY_IMPORTANCE = {"high": 0.9, "medium": 0.6, "low": 0.3}
 _SALIENT = re.compile(
     r"\b(allerg\w*|medication|diabet\w*|vegan|vegetarian|gluten|pregnan\w*|disabilit\w*|"
     r"birthday|anniversary|password|never|always|name)\b",
@@ -254,6 +255,58 @@ class MemoryExtractor:
                 logger.debug("Embedding failed: %s", e)
         logger.debug("Extracted %d memories from %d turns", len(memories), len(turns))
         return memories
+
+    async def observe(
+        self,
+        turns: Sequence[Dict[str, Any]],
+        session_summary: str = "",
+        session_date: Optional[datetime] = None,
+        user_name: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Dated observations of a closed episode (both roles), for the observation log. LLM only."""
+        from memorable_ai.core.llm_client import llm_enabled
+
+        turns = [t for t in turns if _turn_text(t).strip()]
+        if not turns or not (llm_enabled(self.llm_model) or self.llm_client is not None):
+            return []
+        ref_date = session_date or _first_time(turns) or utcnow()
+        prompt = OBSERVATION_PROMPT.format(
+            date=ref_date.strftime("%Y-%m-%d (%A)"),
+            summary=session_summary or "(none)",
+            turns="\n".join(f"[{i}] {t.get('role', 'user')}: {_turn_text(t)[:2000]}" for i, t in enumerate(turns)),
+            user=(f'The user is {user_name}: refer to them as "{user_name}"' if user_name
+                  else 'Refer to the user as "User"'),
+        )
+        items = await self._call_llm_json(prompt, max_tokens=min(6000, 800 + 200 * len(turns)))
+        if isinstance(items, dict):
+            items = items.get("observations") or [items]
+        out: List[Dict[str, Any]] = []
+        for it in items or []:
+            if not isinstance(it, dict) or not str(it.get("content", "")).strip():
+                continue
+            prio = str(it.get("priority", "medium")).lower()
+            prio = prio if prio in PRIORITY_IMPORTANCE else "medium"
+            meta: Dict[str, Any] = {"source": "llm", "extraction_method": "observer", "priority": prio,
+                                    "stated_at": ref_date.isoformat()}
+            if it.get("event_date") and str(it["event_date"]).lower() != "null":
+                meta["event_date"] = str(it["event_date"])[:10]
+            mem: Dict[str, Any] = {"content": str(it["content"]).strip(), "type": "observation", "metadata": meta,
+                                   "valid_from": ref_date, "importance_score": PRIORITY_IMPORTANCE[prio]}
+            idxs = [i for i in (it.get("turns") or []) if isinstance(i, int) and 0 <= i < len(turns)]
+            ids = [turns[i]["id"] for i in idxs if turns[i].get("id") is not None]
+            if ids:
+                mem["source_turn_ids"] = ids
+            mem["entities"] = [{"name": str(e.get("name") if isinstance(e, dict) else e).strip(), "type": "concept"}
+                               for e in (it.get("entities") or []) if (e.get("name") if isinstance(e, dict) else e)]
+            mem["relations"] = []
+            out.append(mem)
+        if self._embedder is not None and out:
+            try:
+                for m, v in zip(out, self._embedder.encode([m["content"] for m in out])):
+                    m["embedding"] = v.tolist()
+            except Exception as e:
+                logger.debug("Embedding failed: %s", e)
+        return out
 
     # ------------------------------------------------------------------ patterns
 
@@ -525,6 +578,36 @@ Rules:
 - relations use the predicates above where one fits, e.g. ["User", "lives_in", "Berlin"], ["Emma", "sibling_of", "User"]. Keep the most specific word when it matters ("sister_of" is fine).
 - Name each entity the same way every time; for a person you know by full name, use the full name.
 - Return [] if there is nothing worth remembering. Output JSON only.
+"""
+
+
+# The observer (docs/observation_memory.md): one call per closed episode writes dated observations
+# that, together, stand in for the conversation itself (Mastra-style observational memory).
+OBSERVATION_PROMPT = """You keep a dated observation log of a user's conversations with an assistant. The log
+replaces the raw conversation: later questions will be answered from it alone.
+
+Date of these messages: {date}
+Conversation so far (summary): {summary}
+
+Messages:
+{turns}
+
+Return a JSON array of observations. Each item:
+{{"content": "one standalone observation", "priority": "high|medium|low",
+  "event_date": "YYYY-MM-DD or null", "entities": ["names in it"], "turns": [message indices]}}
+
+Rules:
+- {user} and use full names for other people.
+- Record everything a later question could ask about: events and when they happened, plans, decisions,
+  preferences and opinions, possessions, people and relationships, numbers, places, and what the
+  assistant said, recommended or did ("Assistant recommended ...").
+- Resolve pronouns and relative dates into names and calendar dates using the date above. event_date
+  is when the event happened, which can differ from the message date.
+- Keep specifics (names, titles, quantities, brands); do not generalise.
+- When something changes an earlier state, say so ("User moved from Boston to Denver").
+- priority: high = what matters about the user later (identity, health, relationships, commitments,
+  changes); medium = events, plans and preferences; low = passing details.
+- Skip greetings and small talk with no content. Return [] if there is nothing. Output JSON only.
 """
 
 

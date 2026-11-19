@@ -49,6 +49,12 @@ class ExtractionConfig(BaseModel):
         default="turn",
         description="When to extract facts: 'turn' (every exchange) or 'episode' (when an episode closes)",
     )
+    facts: bool = Field(default=True, description="Extract facts (off: only the observer writes memories)")
+    observations: bool = Field(
+        default=False,
+        description="Observer: one LLM call per closed episode writes dated observations for the "
+        "observation log (docs/observation_memory.md). Needs an LLM; opt-in until measured",
+    )
 
 
 class RetrievalConfig(BaseModel):
@@ -69,6 +75,10 @@ class RetrievalConfig(BaseModel):
     bm25_weight: float = Field(default=1.0)
     entity_weight: float = Field(default=0.0, description="Deprecated: entity matching now seeds the graph signal")
     graph_weight: float = Field(default=0.6)
+    observation_log_tokens: int = Field(
+        default=4000, description="Budget of the observation log block in get_context (0 = off; only used "
+        "when the observer has written observations)",
+    )
     graph_turn_weight: float = Field(
         default=1.0,
         description="G2: weight of the typed graph walk in turn ranking (0 = off; docs/g2_results.md)",

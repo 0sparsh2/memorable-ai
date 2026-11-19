@@ -56,6 +56,45 @@ def format_excerpt(t: Dict[str, Any], max_chars: int = 280) -> str:
     return f'- {_date(t.get("occurred_at"))} {t.get("role", "user")}: "{content}"'
 
 
+PRIORITY_MARK = {"high": "🔴", "medium": "🟡", "low": "🟢"}  # Mastra's observation markers
+_DROP_ORDER = ("low", "medium", "high")
+
+
+def render_observation_log(observations: Sequence[Dict[str, Any]], max_tokens: Optional[int] = None) -> str:
+    """
+    The observation log (docs/observation_memory.md): every observation, oldest first, under a
+    heading per day it was observed, with its priority and, when it differs, the day it happened.
+    Over ``max_tokens`` the oldest low-priority lines go first, then medium, then high.
+    """
+    rows = []
+    for o in observations:
+        meta = o.get("metadata") or {}
+        seen = _date(meta.get("stated_at") or o.get("valid_from") or o.get("created_at"))
+        event = _date(meta.get("event_date"))
+        prio = meta.get("priority") if meta.get("priority") in PRIORITY_MARK else "medium"
+        line = f"- {PRIORITY_MARK[prio]} {(o.get('content') or '').strip()}" + (
+            f" (on {event})" if event and event != seen else "")
+        rows.append({"seen": seen, "id": o.get("id") or 0, "prio": prio, "line": line})
+    rows.sort(key=lambda r: (r["seen"], r["id"]))
+    def cost(rs) -> int:  # lines plus one heading per day still present
+        return sum(estimate_tokens(r["line"]) + 1 for r in rs) + 4 * len({r["seen"] for r in rs})
+
+    if max_tokens and cost(rows) > max_tokens:
+        for prio in _DROP_ORDER:
+            for r in [r for r in rows if r["prio"] == prio]:
+                if cost(rows) <= max_tokens:
+                    break
+                rows.remove(r)
+    out: List[str] = []
+    day = None
+    for r in rows:
+        if r["seen"] != day:
+            day = r["seen"]
+            out.append(f"Date: {day or 'unknown'}")
+        out.append(r["line"])
+    return "\n".join(out)
+
+
 class ContextBuilder:
     """Render retrieved memories into a single budgeted text block."""
 
@@ -70,8 +109,9 @@ class ContextBuilder:
         excerpts: Sequence[Dict[str, Any]] = (),
         profile: Sequence[Dict[str, Any]] = (),
         session_summary: Optional[str] = None,
+        observation_log: Optional[str] = None,
     ) -> str:
-        if not (facts or episodes or excerpts or profile or session_summary):
+        if not (facts or episodes or excerpts or profile or session_summary or observation_log):
             return ""
         budget = self.max_tokens - estimate_tokens(self.header) - 10
         sections: List[str] = []
@@ -90,6 +130,8 @@ class ContextBuilder:
                 sections.append(title + "\n" + "\n".join(kept))
 
         seen_ids = set()
+        if observation_log:  # budgeted on its own (retrieval.observation_log_tokens)
+            sections.append("Observation log (oldest first):\n" + observation_log.strip())
         if profile:
             lines = []
             for m in profile:
