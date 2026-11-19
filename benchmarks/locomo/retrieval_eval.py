@@ -61,7 +61,7 @@ async def evaluate(convs: int, k: int, embedder: str, db_dir: Path, turn_context
 
     data = load_locomo()
     totals = defaultdict(lambda: defaultdict(lambda: [0, 0]))  # signal -> category -> [hits, n]
-    timings = {"ingest_s": 0.0, "query_ms": []}
+    timings = {"ingest_s": 0.0, "ingest_cpu_s": 0.0, "query_ms": []}
     per_q = defaultdict(list)  # signal -> 0/1 per question, in question order (paired comparisons)
     stats = {"turns": 0, "episodes": 0, "facts": 0, "questions": 0, "entities": 0, "relations": 0}
 
@@ -74,7 +74,7 @@ async def evaluate(convs: int, k: int, embedder: str, db_dir: Path, turn_context
         conv = sample["conversation"]
         speakers = [conv.get("speaker_a"), conv.get("speaker_b")]
         dia_by_turn: Dict[int, str] = {}
-        t0 = time.time()
+        t0, c0 = time.time(), time.process_time()
         for session_key, date_str, turns in iter_sessions(conv):
             when = parse_session_datetime(date_str)
             msgs = [
@@ -94,6 +94,7 @@ async def evaluate(convs: int, k: int, embedder: str, db_dir: Path, turn_context
             for (tid,), t in zip(rows, turns):
                 dia_by_turn[tid] = t.get("dia_id")
         timings["ingest_s"] += time.time() - t0
+        timings["ingest_cpu_s"] += time.process_time() - c0  # wall time balloons when the machine swaps
 
         s = eng._storage.get_session()
         try:
@@ -177,6 +178,7 @@ async def evaluate(convs: int, k: int, embedder: str, db_dir: Path, turn_context
     report = {"k": k, "embedder": embedder, "turn_context": turn_context, "conversations": convs,
               "fusion": fusion or "default", "rerank": rerank or None, "rerank_blend": rerank_blend, **stats}
     report["ingest_seconds"] = round(timings["ingest_s"], 1)
+    report["ingest_cpu_seconds"] = round(timings["ingest_cpu_s"], 1)
     q = sorted(timings["query_ms"])
     report["query_ms_p50"] = round(q[len(q) // 2], 1) if q else None
     report["recall"] = {}

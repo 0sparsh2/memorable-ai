@@ -99,7 +99,8 @@ def main() -> None:
             d = paired(prev["per_question"][s], cur["per_question"][s]) if prev and s in prev.get("per_question", {}) \
                 else "first entry"
             lines.append(f"| {s} | {r} | {d} |")
-        lines += ["", f"Ingest {cur['ingest_seconds']} s, query p50 {cur['query_ms_p50']} ms; graph: {cur.get('entities')} "
+        lines += ["", f"Ingest {cur['ingest_seconds']} s wall / {cur.get('ingest_cpu_seconds', '?')} s CPU, "
+                      f"query p50 {cur['query_ms_p50']} ms; graph: {cur.get('entities')} "
                       f"entities, {cur.get('relations')} relations"
                   + (f" (previous: {prev['ingest_seconds']} s, {prev['query_ms_p50']} ms)" if prev else "") + ".", ""]
     lines += qa_section()

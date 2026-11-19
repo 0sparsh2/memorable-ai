@@ -48,3 +48,29 @@ Ingest 48.6 s, query p50 11.2 ms; graph: 907 entities, 113 relations (previous: 
 | A3w current, 40 turns | 70.9 [66–76] | — | 72.9 [64–81] | 468 / 2040 |
 
 Published (self-reported, other answer models): best LoCoMo 93.6 (Agent Zero Memory), best LongMemEval 95.6 (Agent Zero Memory); Zep 81.5 / 71.2. Full table: `python -m benchmarks.qa.compare`.
+
+## 2026-11-19: G2 part 1: graph walk ranks turns (commit 8161d7d)
+
+Retrieval, LoCoMo (1536 questions, 10 conversations, no LLM):
+
+| Signal | recall@5 | vs previous milestone (paired) |
+|---|---|---|
+| turn/pipeline | 0.701 | unchanged |
+| turn/recall | 0.676 | first entry |
+| episode/fused | 0.575 | unchanged |
+| fact/graph | 0.018 | unchanged |
+| fact/pipeline | 0.059 | unchanged |
+
+Ingest 3487.6 s, query p50 32.2 ms; graph: 907 entities, 113 relations (previous: 48.6 s, 11.2 ms).
+
+Note: the 3,487 s ingest is the machine, not G2. During this run swap was 21.8 of 22.5 GB and the load average was about 10. An identical ingest measured 14.8 s CPU without the G2 mention linking and 13.4 s with it (LoCoMo conversation 1, 19 sessions, 1,080 turn-mention edges), at 925 s and 1,026 s of wall time. The query p50 includes the new `turn/recall` signal (a second retrieval per question). From the next entry, the log also records ingest CPU time. Without an LLM there are only 113 relations, so `turn/recall` measures the walk on a near-empty graph. G2's measured effect is on the LLM-built graphs: held-out all-evidence@10 +1.3 pts (CI +0.4…+2.2), `docs/g2_results.md`.
+
+| QA arm | LoCoMo J-strict | LoCoMo J-lenient | LongMemEval J | answered / queued |
+|---|---|---|---|---|
+| A0 full context | 70.5 [67–74] | 92.3 [90–95] | 50.0 [32–68] | 560 / 1639 |
+| A1 BM25 only | 53.7 [50–58] | — | 70.8 [64–78] | 727 / 2040 |
+| A2 v0.3 (RRF) | 60.2 [56–64] | — | 72.8 [66–80] | 661 / 2040 |
+| A3 current (score fusion + Ettin-17M) | 67.7 [64–72] | 84.7 [82–88] | 74.6 [68–81] | 688 / 2040 |
+| A3w current, 40 turns | 68.7 [65–72] | — | 74.3 [67–81] | 723 / 2040 |
+
+Published (self-reported, other answer models): best LoCoMo 93.6 (Agent Zero Memory), best LongMemEval 95.6 (Agent Zero Memory); Zep 81.5 / 71.2. Full table: `python -m benchmarks.qa.compare`.
