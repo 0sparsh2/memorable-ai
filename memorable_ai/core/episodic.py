@@ -537,13 +537,13 @@ class EpisodicMemory:
             except Exception:
                 embedding = None
         ep_dict = self._finalize(episode_id, title, key_points, entities, embedding, text)
-        if ep_dict and self.knowledge_graph is not None and entities:
-            self.knowledge_graph.ingest_episode(
-                episode_id,
-                entities,
-                Scope(namespace=self.storage.namespace, user_id=ep_dict["user_id"], session_id=ep_dict["session_id"],
-                      agent_id=ep_dict.get("agent_id")),
-            )
+        if ep_dict and self.knowledge_graph is not None:
+            scope = Scope(namespace=self.storage.namespace, user_id=ep_dict["user_id"],
+                          session_id=ep_dict["session_id"], agent_id=ep_dict.get("agent_id"))
+            if entities:
+                self.knowledge_graph.ingest_episode(episode_id, entities, scope)
+            # G2: the episode's turns -> the entities they name (the graph walk reaches turns this way)
+            self.knowledge_graph.link_turn_mentions(scope, episode_id=episode_id)
         return ep_dict
 
     def _finalize(

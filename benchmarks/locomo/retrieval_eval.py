@@ -5,8 +5,9 @@ Ingests each LoCoMo conversation through the real Memorable write pipeline
 (turns -> episodes -> facts -> graph), then for every question checks whether
 the annotated evidence turns (``dia_id``s) come back in the top-k:
 
-* turn recall@k for each signal (dense, lexical, fused RRF) and for the retriever's own
-  turn ranking (``turn/pipeline``: score or rank fusion, per ``--fusion``)
+* turn recall@k for each signal (dense, lexical, fused RRF), for the retriever's first-stage
+  turn ranking (``turn/pipeline``: score or rank fusion, per ``--fusion``), and for what
+  ``recall()`` returns (``turn/recall``: rerank and the G2 graph walk included)
 * episode recall@k (an episode "hits" when it contains an evidence turn)
 * fact recall@k: ``fact/graph`` (Personalized PageRank alone) and ``fact/pipeline``
   (the retriever's fused fact ranking); a fact hits when one of its source turns is
@@ -145,13 +146,16 @@ async def evaluate(convs: int, k: int, embedder: str, db_dir: Path, turn_context
                 first = dict(scored)
                 items = r._rerank(qa.question, items, [first[t["id"]] for t in items], depth=r.rerank_depth)
                 reranked = [t["id"] for t in items]
+            # what the default engine actually returns (rerank and G2 graph walk included)
+            recalled = [t["id"] for t in (await r.recall(qa.question, scope, k_facts=0, k_episodes=0,
+                                                         k_excerpts=k))["excerpts"]]
             eps = r._rank_layer("episode", qa.question, qvec, scope, k)
             graph_facts = [i for i, _ in eng._knowledge_graph.ppr(qa.question, scope, k=k)]
             pipe_facts = [i for i, _ in r.rank_facts(qa.question, scope, k=k, qvec=qvec)]
             timings["query_ms"].append((time.time() - q0) * 1000)
             cat = CATEGORY_NAMES.get(qa.category, str(qa.category))
             signals = [("turn/dense", dense), ("turn/lexical", lexical), ("turn/fused", fused),
-                       ("turn/pipeline", pipeline), *sweep.items()]
+                       ("turn/pipeline", pipeline), ("turn/recall", recalled), *sweep.items()]
             if reranked is not None:
                 signals.append(("turn/reranked", reranked))
             for name, ids in signals:

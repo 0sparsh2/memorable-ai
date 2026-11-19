@@ -69,6 +69,10 @@ class RetrievalConfig(BaseModel):
     bm25_weight: float = Field(default=1.0)
     entity_weight: float = Field(default=0.0, description="Deprecated: entity matching now seeds the graph signal")
     graph_weight: float = Field(default=0.6)
+    graph_turn_weight: float = Field(
+        default=1.0,
+        description="G2: weight of the typed graph walk in turn ranking (0 = off; docs/g2_results.md)",
+    )
     rrf_k: int = Field(default=60)
     fusion: str = Field(
         default="score",

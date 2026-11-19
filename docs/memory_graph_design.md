@@ -288,7 +288,7 @@ The circuit breaker and `model="none"` keep working, so tests stay LLM-free with
 |---|---|---|
 | **G0 Edge table, engine & provenance** ✅ done 2026-11-15 | `edges` + `GraphStore`; the CSR `GraphEngine` (watermark sync, exact float32 PPR, push fallback); migration of relations/mentions; `derived_from` / `part_of` / `next` written by the existing pipeline; `user`/`org` tiers; `agent_id` on scope | existing 113 tests stay green; provenance and cascade tests; `ppr_engines.py` shows the speed-up |
 | **G1 Ontology & resolution** ✅ done 2026-11-18 (§4.1) | Type and predicate registry, registry-guided LLM extraction, entity resolution, entity summaries, `alias_of` | mocked-LLM tests; resolution fixtures (same name, different person; nicknames) |
-| **G2 Multi-layer graph retrieval** | Typed PPR producing per-kind lists, entity cards in L4, `as_of` queries | retrieval unit tests; LoCoMo retrieval eval when evals resume |
+| **G2 Multi-layer graph retrieval** — part 1 ✅ 2026-11-19: typed turn walk + `mentions` edges ([g2_results.md](g2_results.md): held-out all-evidence@10 +1.3 pts, CI +0.4…+2.2) | Typed PPR producing per-kind lists, entity cards in L4, `as_of` queries | retrieval unit tests; LoCoMo retrieval eval when evals resume |
 | **G3 Procedural subgraph** | Procedural P2–P4 write and read through `edges` | procedural golden traces |
 | **G4 Dreaming on the graph** | Communities, insights, predicate canonicalisation, fact re-verification | mocked-LLM tests |
 | **G5 Lifecycle** | Cascade forget/retention, trust-taint propagation | cascade tests |

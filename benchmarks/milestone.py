@@ -26,7 +26,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 STORE = ROOT / "benchmarks" / "milestones"
 LOG = ROOT / "docs" / "benchmark_log.md"
-SIGNALS = ("turn/pipeline", "episode/fused", "fact/graph", "fact/pipeline")
+SIGNALS = ("turn/pipeline", "turn/recall", "episode/fused", "fact/graph", "fact/pipeline")
 
 
 def paired(prev: str, cur: str) -> str:

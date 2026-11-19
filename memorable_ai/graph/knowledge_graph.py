@@ -32,11 +32,12 @@ exactly.
 from __future__ import annotations
 
 import logging
+import math
 import re
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from memorable_ai.core.models import Edge, Entity, EntityAlias
+from memorable_ai.core.models import Edge, Entity, EntityAlias, Turn
 from memorable_ai.core.scope import Scope
 from memorable_ai.core.vector_index import STOPWORDS, light_stem
 from memorable_ai.graph.engine import GraphEngine
@@ -106,6 +107,21 @@ def _stem(word: str) -> str:
 def _clean_obj(o: str) -> str:
     o = _OBJ_CUT.sub("", o.strip())
     return o.strip(" .,:;!?\"'")
+
+
+# G2: a transcript's speaker label ("Caroline: ...") is not a mention of Caroline.
+_SPEAKER_LABEL = re.compile(r"^\s*[A-Z][\w.'-]*(?: [A-Z][\w.'-]*){0,3}:\s+")
+# Edge kinds the turn walk follows (docs/memory_graph_design.md §5; measured in docs/g2_results.md).
+TURN_WALK_WEIGHTS: Dict[str, float] = {"about": 1.0, "derived_from": 1.0, "mentions": 1.0, "relates": 1.0,
+                                       "alias_of": 1.0}
+TURN_SEEDS = 10  # top first-stage turns that seed the walk next to the query's entities (HippoRAG 2)
+TURN_SEED_WEIGHT = 0.05  # their weight relative to an exact entity match (1.0)
+MENTION_MIN_CHARS = 3
+
+
+def turn_body(content: str) -> str:
+    """Lower-cased turn text without a leading speaker label, for mention matching."""
+    return _SPEAKER_LABEL.sub("", content or "", count=1).lower()
 
 
 class KnowledgeGraph:
@@ -436,6 +452,7 @@ class KnowledgeGraph:
             for norm, eid in (decisions or {}).items():
                 ids[norm] = eid
             ents: Dict[str, Entity] = {}
+            fresh: Dict[str, Entity] = {}  # names new to the graph: earlier turns may mention them (G2)
             if self_ent is not None:
                 self_ent.last_seen = now
                 ents["user"] = self_ent
@@ -444,9 +461,13 @@ class KnowledgeGraph:
                 ent = session.get(Entity, eid) if eid else None
                 if ent is None:
                     ent = self._create_entity(session, scope, m.name, m.etype, now)
+                    fresh[norm] = ent
                 else:
                     how = how_by_norm.get(norm) if decisions and norm in decisions else None
-                    self._touch(session, scope, ent, m, how or self._how(ent, m), now)
+                    how = how or self._how(ent, m)
+                    self._touch(session, scope, ent, m, how, now)
+                    if how != "exact":
+                        fresh[norm] = ent
                 ents[norm] = ent
 
             about: Dict[int, str] = {}  # entity id -> role
@@ -502,12 +523,15 @@ class KnowledgeGraph:
                              for eid, role in about.items()])
             self._refresh_summaries(session, touched, now)
             session.commit()
+            fresh_ids = {norm: ent.id for norm, ent in fresh.items() if not ent.is_self}
         except Exception as e:
             session.rollback()
             logger.warning("Knowledge graph ingest failed for memory %s: %s", mid, e)
             return []
         finally:
             session.close()
+        if fresh_ids:
+            self.backfill_turn_mentions(scope, fresh_ids)
         return superseded_facts
 
     @staticmethod
@@ -619,6 +643,129 @@ class KnowledgeGraph:
             logger.debug("Episode graph ingest failed: %s", e)
         finally:
             session.close()
+
+    # ------------------------------------------------------------------ turn mentions (G2)
+
+    def _mention_names(self, session: Any, scope: Scope) -> Dict[str, Set[int]]:
+        """Entity names and aliases of the scope (not the user's own) -> canonical entity ids."""
+        skip = self._self_aliases(session, scope) | {"user"}
+        raw: List[Tuple[str, int]] = []
+        q = session.query(Entity.id, Entity.norm_name, Entity.is_self)
+        raw += [(norm, eid) for eid, norm, is_self in self._scoped(q, Entity, scope).all() if not is_self]
+        q = session.query(EntityAlias.alias, EntityAlias.entity_id)
+        raw += list(self._scoped(q, EntityAlias, scope).all())
+        canon = self._follow_merges(session, [eid for _, eid in raw])
+        names: Dict[str, Set[int]] = {}
+        for norm, eid in raw:
+            if norm and len(norm) >= MENTION_MIN_CHARS and norm not in skip and norm not in STOPWORDS:
+                names.setdefault(norm, set()).add(canon.get(eid, eid))
+        return names
+
+    def _add_turn_mentions(self, session: Any, scope: Scope, turns: Iterable[Tuple[int, str]],
+                           names: Dict[str, Set[int]]) -> int:
+        """turn -mentions-> entity for whole-word matches, skipping pairs already linked."""
+        if not names:
+            return 0
+        pat = re.compile(r"\b(" + "|".join(sorted(map(re.escape, names), key=len, reverse=True)) + r")\b")
+        found: Dict[int, Set[int]] = {}
+        for tid, content in turns:
+            hit: Set[int] = set()
+            for m in pat.finditer(turn_body(content)):
+                hit |= names.get(m.group(1), set())
+            if hit:
+                found[int(tid)] = hit
+        if not found:
+            return 0
+        existing = set(
+            session.query(Edge.src_id, Edge.dst_id).filter(
+                Edge.kind == "mentions", Edge.src_kind == "turn", Edge.dst_kind == "entity",
+                Edge.src_id.in_(list(found)), Edge.invalidated_at.is_(None)).all()
+        )
+        new = [(t, e) for t, es in found.items() for e in sorted(es) if (t, e) not in existing]
+        if not new:
+            return 0
+        seq = self.storage.next_graph_seq(session)
+        now = utcnow()
+        session.add_all([self._edge(scope, ("turn", t), "mentions", ("entity", e), created_at=now, seq=seq)
+                         for t, e in new])
+        return len(new)
+
+    def link_turn_mentions(self, scope: Scope, episode_id: Optional[int] = None,
+                           turn_ids: Optional[Sequence[int]] = None) -> int:
+        """Link an episode's (or the given) turns to the known entities they name. Returns edges added."""
+        if episode_id is None and not turn_ids:
+            return 0
+        session = self.storage.get_session()
+        try:
+            names = self._mention_names(session, scope)
+            q = session.query(Turn.id, Turn.content)
+            q = q.filter(Turn.episode_id == int(episode_id)) if episode_id is not None else \
+                q.filter(Turn.id.in_([int(t) for t in turn_ids or ()]))
+            n = self._add_turn_mentions(session, scope, self._scoped(q, Turn, scope).all(), names)
+            session.commit()
+            return n
+        except Exception as e:
+            session.rollback()
+            logger.debug("Turn mention linking failed: %s", e)
+            return 0
+        finally:
+            session.close()
+
+    def backfill_turn_mentions(self, scope: Scope, names: Dict[str, int], per_name: int = 200) -> int:
+        """A name new to the graph: link the earlier turns that use it (found through the turn index)."""
+        session = self.storage.get_session()
+        try:
+            skip = self._self_aliases(session, scope) | {"user"}
+            names = {n: e for n, e in names.items()
+                     if n and len(n) >= MENTION_MIN_CHARS and n not in skip and n not in STOPWORDS}
+            ids: Set[int] = set()
+            for norm in names:
+                ids |= {i for i, _ in self.storage.lexical_search("turn", norm, k=per_name, user_id=scope.user_id)}
+            if not ids:
+                return 0
+            turns = self._scoped(session.query(Turn.id, Turn.content).filter(Turn.id.in_(list(ids))), Turn, scope).all()
+            n = self._add_turn_mentions(session, scope, turns, {k: {v} for k, v in names.items()})
+            session.commit()
+            return n
+        except Exception as e:
+            session.rollback()
+            logger.debug("Turn mention backfill failed: %s", e)
+            return 0
+        finally:
+            session.close()
+
+    def turn_walk(self, query: str, scope: Scope, seed_turns: Dict[int, float], k: int = 50,
+                  include_shared: bool = False) -> List[Tuple[int, float]]:
+        """
+        Rank turns by a typed Personalized PageRank (G2). Seeds: the query's entities, plus the top
+        first-stage turns at a small weight (HippoRAG 2). The walk follows facts to their source
+        turns and entities to the turns that name them.
+        """
+        try:
+            seeds: Dict[Tuple[str, int], float] = {}
+            ents = self.match_query_entities(query, scope, include_shared)
+            session = self.storage.get_session()
+            try:
+                self_ids = [r[0] for r in self._scoped(session.query(Entity.id).filter(Entity.is_self == 1),
+                                                       Entity, scope, include_shared).all()]
+            finally:
+                session.close()
+            seeds.update({("entity", e): w for e, w in ents.items() if e not in self_ids})
+            top = sorted(seed_turns.items(), key=lambda kv: kv[1], reverse=True)[:TURN_SEEDS]
+            if top:
+                v = [s for _, s in top]
+                mean, sd = sum(v) / len(v), (sum((x - sum(v) / len(v)) ** 2 for x in v) / len(v)) ** 0.5 or 1.0
+                for t, sc in top:
+                    seeds[("turn", int(t))] = TURN_SEED_WEIGHT * math.exp((sc - mean) / sd)
+            if not seeds:
+                return []
+            res = self.engine.ppr(self.storage.namespace or scope.namespace, scope.user_id, seeds,
+                                  include_shared=include_shared, exclude=[("entity", i) for i in self_ids],
+                                  weights=TURN_WALK_WEIGHTS)
+            return res.top("turn", k)
+        except Exception as e:
+            logger.debug("Turn walk failed: %s", e)
+            return []
 
     def invalidate_memory(self, memory_id: int) -> None:
         """Retire the relations asserted by a fact that is no longer valid."""

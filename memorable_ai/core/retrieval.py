@@ -67,6 +67,7 @@ class HybridRetriever:
         include_shared: bool = False,
         profile_facts: int = 3,
         turn_embedding_model: Any = None,
+        graph_turn_weight: float = 0.0,
     ):
         from memorable_ai.core.embeddings import as_embedder, get_embedder
 
@@ -102,6 +103,7 @@ class HybridRetriever:
         self.max_episodes = max_episodes
         self.max_excerpts = max_excerpts
         self.profile_facts = profile_facts
+        self.graph_turn_weight = graph_turn_weight  # G2: typed graph walk as a turn signal (0 = off)
         self.context_builder = ContextBuilder(max_tokens=max_context_tokens)
 
     # ------------------------------------------------------------------ scope helpers
@@ -242,6 +244,30 @@ class HybridRetriever:
             )
         return fused
 
+    def _with_graph_turns(
+        self, query: str, scope: Scope, ranked: List[Tuple[int, float]], pool: int
+    ) -> List[Tuple[int, float]]:
+        """
+        G2: add the typed graph walk's turn scores to the first stage. Both signals are
+        z-scored over their own lists and summed (``graph_turn_weight`` on the walk); a turn
+        missing from one list gets that list's minimum. Turns only the walk found join the
+        pool, and the reranker orders the result as before (docs/g2_results.md).
+        """
+        first = dict(ranked)
+        graph = dict(self.knowledge_graph.turn_walk(query, scope, first, k=pool, include_shared=self.include_shared))
+        if not graph:
+            return ranked
+
+        def z(v: Dict[int, float]) -> Dict[int, float]:
+            a = np.fromiter(v.values(), dtype=float)
+            sd = float(a.std()) or 1.0
+            return {i: (x - float(a.mean())) / sd for i, x in v.items()}
+
+        zf, zg = z(first), z(graph)
+        lo_f, lo_g = min(zf.values()), min(zg.values())
+        fused = {t: zf.get(t, lo_f) + self.graph_turn_weight * zg.get(t, lo_g) for t in set(first) | set(graph)}
+        return sorted(fused.items(), key=lambda kv: kv[1], reverse=True)
+
     def _reranker_model(self):
         if self._reranker is None:
             from memorable_ai.core.rerank import load_reranker
@@ -318,9 +344,10 @@ class HybridRetriever:
             result["episodes"] = [e for e in eps if e.get("status") == "closed"][:k_episodes]
         if k_excerpts:
             tvec = qvec if self.turn_embedder is self.embedder else self._encode(query, kind="turn")
-            ranked = self._rank_layer_scored(
-                "turn", query, tvec, scope, k_excerpts * 3, pool=max(k_excerpts * 12, self.rerank_depth * 2)
-            )
+            pool = max(k_excerpts * 12, self.rerank_depth * 2)
+            ranked = self._rank_layer_scored("turn", query, tvec, scope, k_excerpts * 3, pool=pool)
+            if self.graph_turn_weight > 0 and self.knowledge_graph is not None and ranked:
+                ranked = self._with_graph_turns(query, scope, ranked, pool)
             first = dict(ranked)
             turns = self.storage.hydrate_turns([i for i, _ in ranked], user_id=uid, include_shared=self.include_shared)
             # The current session is already in the prompt; excerpts come from other sessions.

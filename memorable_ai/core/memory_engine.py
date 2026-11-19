@@ -261,6 +261,7 @@ class MemoryEngine:
             bm25_weight=rcfg.bm25_weight,
             entity_weight=rcfg.entity_weight,
             graph_weight=rcfg.graph_weight,
+            graph_turn_weight=rcfg.graph_turn_weight,
             rrf_k=rcfg.rrf_k,
             min_semantic_score=rcfg.min_semantic_score,
             rerank=rcfg.rerank,
