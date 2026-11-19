@@ -28,7 +28,8 @@ NIM_LLM_MODELS: Dict[str, str] = {
     "nvidia/nemotron-3.5-lightning-30b-a3b": "Default: fast MoE (3B active), reasoning on by default",
     # measured: 4-7 s for ~500 output tokens, thinking off
     "nvidia/nemotron-3.5-bolt-e4b": "Fast small model; good for short structured generation",
-    # measured 2026-11-18: 2.7 s with thinking (correct); 2.1 s without (wrong on the probe)
+    # measured 2026-11-18: 2.7 s with thinking (correct); 2.1 s without (wrong on the probe).
+    # 2026-11-19: thinks unless told not to (420 vs 54 output tokens, 10.9 s vs 0.8 s on a JSON job)
     "nvidia/nemotron-3-ultra-550b-a55b": "Largest Nemotron (55B active, 1M context); fast on the free tier",
     # measured 2026-11-18: 8.3 s, correct; reasons even with enable_thinking=false
     "mistralai/mistral-large-4-1t-a52b": "Mistral Large 4 (52B active); always reasons",
@@ -61,7 +62,7 @@ DEFAULT_MEMORY_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
 # summaries, entity resolution) want short structured output: thinking costs 10-25x the
 # latency (measured 2-5 s vs 0.2 s) and can use up max_tokens before any JSON is written,
 # which the pipeline would read as "nothing to remember". MEMORABLE_LLM__THINKING=on keeps it.
-THINKING_BY_DEFAULT = {"nvidia/nemotron-3.5-lightning-30b-a3b"}
+THINKING_BY_DEFAULT = {"nvidia/nemotron-3.5-lightning-30b-a3b", "nvidia/nemotron-3-ultra-550b-a55b"}
 
 
 def request_defaults(model: str) -> Dict[str, object]:

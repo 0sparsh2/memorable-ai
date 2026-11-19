@@ -35,7 +35,7 @@ All answered by `<READER>` with v3's prompt and settings, judged by v3's judge.
 | D7 | decoy | A3g plus the log of another conversation of the same benchmark (fixed derangement; for LoCoMo-dev the other dev conversation) |
 | A0 | full history | v5's answers (same reader, same questions) |
 
-**Observer model:** `nvidia/nemotron-3-ultra-550b-a55b` on NIM's free tier, temperature 0. Whether it thinks by default is checked in the dry run: thinking is switched off for the observer if it does.
+**Observer model:** `nvidia/nemotron-3-ultra-550b-a55b` on NIM's free tier, temperature 0, thinking off. The dry run found that Ultra thinks unless told not to (420 against 54 output tokens on one probe), so memory jobs on Ultra now send `enable_thinking=false`, as they already did for Lightning.
 
 **Questions:** LoCoMo-dev (conv-48, conv-49: 347) and LME-dev (150), for every arm including D7.
 

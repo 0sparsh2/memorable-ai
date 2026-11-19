@@ -55,7 +55,7 @@ def test_resolve_memory_model_defaults_to_live_model(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_memory_jobs_turn_thinking_off_on_reasoning_models(monkeypatch):
-    """Lightning thinks by default; extraction must not spend max_tokens on thinking."""
+    """Lightning and Ultra think by default; extraction must not spend max_tokens on thinking."""
     import litellm
 
     from memorable_ai.core import llm_client
@@ -72,6 +72,8 @@ async def test_memory_jobs_turn_thinking_off_on_reasoning_models(monkeypatch):
     await llm_client.acompletion("nvidia_nim/nvidia/nemotron-3.5-lightning-30b-a3b",
                                  [{"role": "user", "content": "x"}], max_tokens=10)
     assert seen[-1]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    await llm_client.acompletion("nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b", [{"role": "user", "content": "x"}])
+    assert seen[-1]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}, "the observer's model"
     await llm_client.acompletion("nvidia_nim/nvidia/nemotron-3.5-bolt-e4b", [{"role": "user", "content": "x"}])
     assert "extra_body" not in seen[-1], "models that answer directly get no extra fields"
     await llm_client.acompletion("nvidia_nim/nvidia/nemotron-3.5-lightning-30b-a3b", [{"role": "user", "content": "x"}],
