@@ -651,7 +651,8 @@ def _nim_client():
         env = {**dotenv_values(ROOT / ".env"), **os.environ}
         _NIM["key"] = (env.get("NVIDIA_NIM_API_KEY") or env.get("NVIDIA_API_KEY") or "").strip()
         _NIM["base"] = (env.get("NVIDIA_NIM_API_BASE") or "https://integrate.api.nvidia.com/v1").rstrip("/")
-        _NIM["http"] = httpx.AsyncClient(timeout=httpx.Timeout(240, connect=15))
+        # prereg v5 pilot: Mistral Large 4 often answers after 240 s; the timeout is a client setting
+        _NIM["http"] = httpx.AsyncClient(timeout=httpx.Timeout(float(os.getenv("E2E_QA_HTTP_TIMEOUT", "240")), connect=15))
     return _NIM
 
 
