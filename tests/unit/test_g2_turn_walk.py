@@ -65,6 +65,14 @@ async def test_new_name_backfills_earlier_turns(eng):
 
 
 @pytest.mark.asyncio
+async def test_entity_from_an_episode_backfills_earlier_turns(eng):
+    await say(eng, ["We had dinner at the harbour club on Friday night.", "That sounds lovely.",
+                    "The food was great and the view even better.", "Glad you enjoyed it."])
+    eng._knowledge_graph.ingest_episode(999, ["harbour club"], U)
+    assert ("We had dinner at the harbour club on Friday night.", "harbour club") in mention_pairs(eng)
+
+
+@pytest.mark.asyncio
 async def test_episode_close_links_known_entities(eng):
     fact(eng, "Marguerite is the user's cousin", [("Marguerite", "person"), ("Bob", "person")])
     await say(eng, ["Bob: I saw Marguerite at the station this morning.", "Did she say hello?",

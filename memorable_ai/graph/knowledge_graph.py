@@ -638,6 +638,7 @@ class KnowledgeGraph:
         if not episode_id or not names:
             return
         session = self.storage.get_session()
+        fresh: Dict[str, int] = {}  # names new to the graph: earlier turns may use them (G2 backfill)
         try:
             seq = self.storage.next_graph_seq(session)
             seen: Set[int] = set()
@@ -646,14 +647,19 @@ class KnowledgeGraph:
                 if ent is None or ent.is_self or ent.id in seen:
                     continue
                 seen.add(ent.id)
+                if not ent.mention_count:
+                    fresh[ent.norm_name] = ent.id
                 session.add(self._edge(scope, ("episode", int(episode_id)), "mentions", ("entity", ent.id), seq=seq))
                 ent.mention_count = (ent.mention_count or 0) + 1
             session.commit()
         except Exception as e:
             session.rollback()
+            fresh = {}
             logger.debug("Episode graph ingest failed: %s", e)
         finally:
             session.close()
+        if fresh:
+            self.backfill_turn_mentions(scope, fresh)
 
     # ------------------------------------------------------------------ turn mentions (G2)
 

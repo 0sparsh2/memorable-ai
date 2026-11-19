@@ -171,10 +171,12 @@ async def run_conv(conv: str, sample, ks, slots, fuse_w, turn_seed_n, turn_seed_
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-async def run_conv_product(conv: str, sample, ks, out_rows):
-    """The shipped path: KnowledgeGraph.link_turn_mentions per episode, then recall() at weight 0 vs 1."""
+async def run_conv_product(conv: str, sample, ks, out_rows, plain: bool = False):
+    """The shipped path: KnowledgeGraph.link_turn_mentions per episode, then recall() at weight 0 vs 1.
+    ``plain``: a fresh LLM-free ingest (the sparse graph every user without an LLM gets) instead of
+    the cached LLM-built graph."""
     from benchmarks.locomo.loader import iter_qa, iter_sessions
-    from benchmarks.qa.e2e_qa import ETTIN17, _engine
+    from benchmarks.qa.e2e_qa import ETTIN17, _engine, _ingest, locomo_items
     from memorable_ai.core.models import Episode, Turn
     from memorable_ai.core.rerank import load_reranker
     from memorable_ai.core.scope import Scope
@@ -182,8 +184,12 @@ async def run_conv_product(conv: str, sample, ks, out_rows):
     tmp = Path(tempfile.mkdtemp(prefix="g2p_"))
     try:
         db = tmp / f"{conv}.db"
-        shutil.copy(CACHE / f"{conv}.llm.db", db)
-        eng = _engine(db)
+        if plain:
+            item = next(it for it in locomo_items() if it["group"] == conv)
+            eng = await _ingest(item, db)
+        else:
+            shutil.copy(CACHE / f"{conv}.llm.db", db)
+            eng = _engine(db)
         r = eng._retrieval
         r.fusion, r.rerank, r.rerank_model, r.rerank_depth, r.rerank_blend = "score", True, ETTIN17, 20, 0.0
         r._reranker = load_reranker(ETTIN17)
@@ -261,6 +267,7 @@ def main() -> None:
     ap.add_argument("--turn-seed-weight", type=float, default=0.05)
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--product", action="store_true", help="measure the shipped code path (recall at weight 0 vs 1)")
+    ap.add_argument("--plain", action="store_true", help="with --product: fresh LLM-free ingest, not the LLM graph")
     args = ap.parse_args()
     ks = [int(x) for x in args.k.split(",")]
     wanted = args.convs.split(",")
@@ -268,13 +275,13 @@ def main() -> None:
     for ci, sample in enumerate(load_locomo()):
         conv = sample_id(sample, ci)
         if conv in wanted and args.product:
-            mentions[conv] = asyncio.run(run_conv_product(conv, sample, ks, rows))
+            mentions[conv] = asyncio.run(run_conv_product(conv, sample, ks, rows, plain=args.plain))
         elif conv in wanted:
             mentions[conv] = asyncio.run(run_conv(conv, sample, ks, [int(x) for x in args.slots.split(",")],
                                                   [float(x) for x in args.fuse.split(",")], args.turn_seeds,
                                                   args.turn_seed_weight, rows))
     summary = {"convs": wanted, "questions": len(rows), "turn_mentions_added": mentions,
-               "settings": {"mode": "product" if args.product else "experiment", "turn_seeds": args.turn_seeds,
+               "settings": {"mode": ("product-plain" if args.plain else "product") if args.product else "experiment", "turn_seeds": args.turn_seeds,
                             "turn_seed_weight": args.turn_seed_weight, "profiles": PROFILES},
                "ms_p50": {k: round(float(np.median([r["ms"][k] for r in rows])), 1) for k in rows[0]["ms"]},
                "results": summarise(rows, ks)}

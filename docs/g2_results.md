@@ -45,6 +45,18 @@ Before G2, Personalized PageRank ranked only facts. Turns, which hold most of th
   - The walk without `mentions` edges: +1.7 / +2.3 at k=10 / 20, against +2.0 / +3.7 with them.
   - The simplest consistently positive setting was frozen rather than the best cell.
 
+## Without an LLM
+
+A user without an LLM gets a sparse graph: heuristic entities and episode mentions, about 250 turn mentions per conversation against about 1,600 in the LLM-built graphs. On fresh LLM-free ingests of the dev conversations (shipped code, A3 settings, 347 questions):
+
+| all@10 | any@10 | all@20 | any@20 |
+|---|---|---|---|
+| 62.8 → 63.4 (+0.6, CI −0.9…+2.3) | +0.3 (CI −1.4…+2.0) | −0.3 (CI −2.3…+1.7) | −1.2 (CI −3.2…+0.9) |
+
+There is no measurable effect either way, for +6.5 ms. The default stays on: the walk helps where the graph has substance and is neutral where it does not.
+
+That run also found a write-path gap. Entities first named in an episode summary (`ingest_episode`) did not backfill earlier turns; only fact-created entities did. A final linking pass still found 263 missing links in the two conversations. Fixed: episode-created entities now backfill too. Afterwards a final pass found 8 missing links in conv-48.
+
 ## Not done yet (rest of G2)
 
 - **Entity cards in L4:** the summary and current relations of the query's top entities. That is aggregated memory, which suits the multi-hop questions this walk barely moves, and it shows in answers, not in turn coverage.
