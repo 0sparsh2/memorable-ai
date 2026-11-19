@@ -47,6 +47,6 @@ Prereg v6 was frozen and committed before this pilot wrote anything. The observe
 
 ## Approval and full run
 
-On 2026-11-19 the owner approved the full run as preregistered, and chose the judge order: v6's answers before the paused v3/v4 loop resumes. The observer ingest started at 14:13 EST (`runs/v6/full_build.log`, pid in `full_build.pid`): an A7 pass over LoCoMo-dev and the 150 LME-dev haystacks (the pilot's six logs are reused from the cache), then a D7 pass, which needs every log. Same settings as the pilot: Ultra, thinking off, 6 requests/min offered, 2 haystacks in parallel.
+On 2026-11-19 the owner approved the full run as preregistered, and chose the judge order: v6's answers before the paused v3/v4 loop resumes. The observer ingest started at 15:20 EST (`runs/v6/full_build.log`, pid in `full_build.pid`): an A7 pass over LoCoMo-dev and the 150 LME-dev haystacks (the pilot's six logs are reused from the cache), then a D7 pass, which needs every log. Same settings as the pilot: Ultra, thinking off, 6 requests/min offered, 2 haystacks in parallel.
 
 Prereg v6.1 (the batched observer) is not run: its rule picked no batch size (`prereg-v6.1.md`).
