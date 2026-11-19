@@ -90,6 +90,12 @@ _OBJ_CUT = re.compile(
     r"and then|but)\b.*$",
     re.I,
 )
+# Chat openers are capitalised but are not names: "Hey Jolene" is Jolene, "I'm" is nobody.
+_INTERJECTIONS = {"hey", "hi", "hello", "hiya", "thanks", "thank", "wow", "oh", "ooh", "yeah", "yes", "yep", "ok",
+                  "okay", "congrats", "congratulations", "aw", "aww", "awww", "haha", "lol", "omg", "bye", "sorry",
+                  "dear", "ah", "hmm", "um", "ugh", "yay", "whoa", "cheers"}
+_CONTRACTION = re.compile(r"^(?:i|it|that|let|there|here|what|who|you|we|they|he|she|don|can|won|didn|isn|wasn)"
+                          r"'(?:m|s|ve|d|ll|re|t)$", re.I)
 _CAP_SEQ = re.compile(r"\b([A-Z][\w&'-]*(?:\s+(?:of|the|de|van|von|da)?\s*[A-Z][\w&'-]*)*)")
 
 
@@ -179,7 +185,12 @@ class KnowledgeGraph:
             entities[normalize_entity(obj)] = {"name": obj, "type": ent_type}
             break
         for m in _CAP_SEQ.finditer(text):
-            name = m.group(1).strip()
+            words = m.group(1).strip().split()
+            while words and words[0].lower().strip("!,.") in _INTERJECTIONS:
+                words = words[1:]
+            if not words or (len(words) == 1 and _CONTRACTION.match(words[0])):
+                continue
+            name = " ".join(words)
             norm = normalize_entity(name)
             if (
                 not norm

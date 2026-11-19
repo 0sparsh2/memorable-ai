@@ -136,3 +136,15 @@ async def test_weight_zero_is_the_old_ranking(eng):
     eng._knowledge_graph.turn_walk = lambda *a, **k: called.append(1) or []
     await r.recall("What does Ana's brother do?", U, k_facts=0, k_episodes=0, k_excerpts=3)
     assert not called
+
+
+def test_chat_openers_are_not_entities():
+    from memorable_ai.graph.knowledge_graph import KnowledgeGraph
+
+    names = lambda t: {e["name"] for e in KnowledgeGraph.extract(t)[0]}  # noqa: E731
+    got = names("Hey Jolene, I'm so proud of you!")
+    assert "Jolene" in got and "Hey Jolene" not in got and "I'm" not in got
+    assert names("Wow Deb that's amazing") >= {"Deb"} and "Wow Deb" not in names("Wow Deb that's amazing")
+    assert not names("Thanks! I've been busy.")
+    assert "Great Wall of China" in names("We walked the Great Wall of China")
+    assert any("Jolene" in n for n in names("Jolene's partner cooked")), "a possessive is still a name"
