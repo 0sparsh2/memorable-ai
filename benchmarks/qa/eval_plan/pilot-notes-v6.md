@@ -21,3 +21,26 @@ Prereg v6 was frozen and committed before this pilot wrote anything. The observe
 - **The log:** 393 observations (125 high, 189 medium, 79 low; 322 with an event date), about 10.8k tokens, so A7's 30k budget cuts nothing here.
 - **The date that was off:** on Tue 2023-09-12 Jolene says "last weekend my partner and I traveled to a meditation retreat for a few weeks"; the observer dated the retreat 2023-08-29 instead of about 09-09.
 - **Detail, without answers** (`benchmarks/qa/observer_batch.py`, 191 questions with evidence): every gold evidence turn is cited by some observation for 94.8% of questions (A3g's top 10 turns hold all of it for about 63%), and one observation holds every content word of the short answer for 65.8% of the 111 non-temporal questions with a 1–5 word answer. Reported only; v6's bars are on answers.
+
+### 5 LME-dev haystacks: passed
+
+| Haystack | Sessions | Calls | Retries (429) | Observations | Log tokens | Ingest |
+|---|---|---|---|---|---|---|
+| 1e043500 | 50 | 55 | 0 | 519 | 26,345 | 1,211 s |
+| 7527f7e2 | 45 | 54 | 0 | 506 | 25,437 | 1,121 s |
+| c960da58 | 46 | 56 | 14 | 553 | 26,451 | 1,455 s |
+| 3b6f954b | 50 | 57 | 21 | 553 | 25,210 | 2,155 s |
+| 726462e0 | 48 | 56 | 7 | 510 | 25,334 | 1,178 s |
+
+- **Bars:** 278 calls, 1.16 per session (≤ 2.5); 0 failed after retries, 0 empty, 0 unparseable, 0 with thinking text. Every episode yielded observations.
+- **The log fits, barely:** 25–26.5k tokens per haystack against A7's 30k budget, so the budget cuts nothing on these five. Other haystacks may run over; the report counts cuts.
+- **Detail, without answers:** all 5 logs cite their evidence turn and hold the answer in one observation. All five are single-session-user questions (the first five in file order), so this says nothing yet about multi-session or temporal questions.
+- **Rate:** 278 calls in 3,827 s, 4.4 calls/min with 2 haystacks in parallel and v5 asking Ultra for about one answer a minute. The 42 retries were 429s.
+
+### Projection
+
+`PILOT_PROJECTION: per_item=55.6 calls/haystack (sd 1.1, n=5) total_items=145 LME haystacks + conv-49 (48 calls) projected=31 h (8,110 calls at 4.4/min) band95=22.5..38.6 h (6.0..3.5 calls/min) cap=72 h verdict=within`
+
+- Timed: the five pilot haystacks above (wall clock, `retrieve --arms A7 --parallel 2 --llm-rpm 6`). The limit is NIM's per-model request rate on Ultra; the local ingest is about 4 s of CPU per session.
+- Answers (after v5 names the reader): A3g, A7 and D7 on 497 questions each plus the 60-question drift check, 1,551 answers and about 2,250 judge calls on Lightning. At the judge's 4–6 calls/min, 7–10 h.
+- D7 needs every log, so it is built in a second pass once the A7 pass has finished.
