@@ -1,0 +1,16 @@
+{
+ "CHECK: price-table": "ok (3 readers, $0, NIM free tier)",
+ "CHECK: input-shapes": "ok (2,872 records, every field the answer stage reads)",
+ "CHECK: length-budget": "ok to pilot: longest A0-LME prompt ~128,308 tokens est.; the pilot sends it to every reader",
+ "CHECK: reservation-fits-cap": "ok ($0; the largest unit is one ~128k-token call)",
+ "CHECK: memory": "ok (no local model; HTTP only)",
+ "CHECK: split-disjointness": "ok (LME splits {'dev': 690}; LoCoMo conversations {'conv-48': 1200, 'conv-49': 982})",
+ "CHECK: stored-contexts-identical": "ok (2082 A0/A3 LoCoMo records equal v3's, 0 differ)",
+ "CHECK: scorer-on-decoys": "ok (judge unchanged from v3, B6 passed; C2 re-runs it with Ultra)",
+ "stub": {
+  "answered": 2872,
+  "unparsed": 0,
+  "lenient_cells": "A0/A3 LoCoMo only"
+ },
+ "DRY_RUN_RESULT": "pass"
+}

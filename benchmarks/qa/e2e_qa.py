@@ -93,6 +93,20 @@ ARMS["A6"] = dict(ARMS["A3"], k_excerpts=80, subset="v4")
 ARMS["D5"] = dict(ARMS["A5"], facts_from="other", subset="v4d")  # decoy: another conversation's facts
 LENIENT_ARMS.add("A5")
 _GROUP_ORDER: Dict[str, List[str]] = {}  # bench -> group ids, for D5's fixed derangement
+
+# prereg v5 (answer model): a context record may name a reader; the judge stays MODEL. Arms are
+# written "<arm>@<reader>" so every (arm, reader) cell is answered and deduplicated on its own.
+READERS: Dict[str, str] = {
+    "lightning": "nvidia_nim/nvidia/nemotron-3.5-lightning-30b-a3b",
+    "ultra": "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b",
+    "mistral": "nvidia_nim/mistralai/mistral-large-4-1t-a52b",
+}
+V5_SEED = 20261119
+LOCOMO_DEV = ("conv-48", "conv-49")  # prereg v5: LoCoMo's dev conversations, drawn with V5_SEED
+
+
+def base_arm(arm: str) -> str:
+    return arm.split("@", 1)[0]
 _RUN_DIR: List[Path] = []
 
 
@@ -604,6 +618,16 @@ class RateLimiter:
 
 
 LIMITER = RateLimiter(0)
+READER_LIMITERS: Dict[str, RateLimiter] = {}  # prereg v5: one per reader model (NIM limits per model)
+READER_RPM = [6.0]
+
+
+def _limiter(model: Optional[str]) -> RateLimiter:
+    if not model or model == MODEL:
+        return LIMITER
+    if model not in READER_LIMITERS:
+        READER_LIMITERS[model] = RateLimiter(READER_RPM[0])
+    return READER_LIMITERS[model]
 ERROR_LOG: Optional[Path] = None  # every failed attempt, timestamped (set by the answer stage)
 
 
@@ -630,14 +654,15 @@ def _nim_client():
     return _NIM
 
 
-async def _complete(msgs, *, effort: str, max_tokens: int):
+async def _complete(msgs, *, effort: str, max_tokens: int, model: Optional[str] = None):
     """One completion -> (text, usage). effort: "low" = think (answers), "minimal" = no thinking (judge)."""
-    if MODEL.startswith("nvidia_nim/"):
+    model = model or MODEL
+    if model.startswith("nvidia_nim/"):
         nim = _nim_client()
         think = effort != "minimal"
         r = await nim["http"].post(
             f"{nim['base']}/chat/completions", headers={"Authorization": f"Bearer {nim['key']}"},
-            json={"model": MODEL.split("/", 1)[1], "messages": msgs, "temperature": 0,
+            json={"model": model.split("/", 1)[1], "messages": msgs, "temperature": 0,
                   "max_tokens": max_tokens if not think else max(max_tokens, ANSWER_MAX_TOKENS),
                   "chat_template_kwargs": {"enable_thinking": think}})
         if r.status_code != 200:
@@ -650,7 +675,7 @@ async def _complete(msgs, *, effort: str, max_tokens: int):
                                                     "fingerprint": b.get("system_fingerprint")}
     import litellm
 
-    resp = await litellm.acompletion(model=MODEL, messages=msgs, temperature=0, max_tokens=max_tokens,
+    resp = await litellm.acompletion(model=model, messages=msgs, temperature=0, max_tokens=max_tokens,
                                      reasoning_effort=effort, timeout=180)
     u = resp.usage
     ptd = getattr(u, "prompt_tokens_details", None)
@@ -660,7 +685,8 @@ async def _complete(msgs, *, effort: str, max_tokens: int):
         "out": int(u.completion_tokens or 0), "reasoning": int(getattr(ctd, "reasoning_tokens", 0) or 0)}
 
 
-async def llm_call(prompt: str, *, system: Optional[str], effort: str, max_tokens: int, stub: Optional[str]):
+async def llm_call(prompt: str, *, system: Optional[str], effort: str, max_tokens: int, stub: Optional[str],
+                   model: Optional[str] = None):
     if stub is not None:
         return stub, {"in": len(prompt) // 4, "cached": 0, "out": len(stub) // 4, "reasoning": 0}
     msgs = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
@@ -671,8 +697,8 @@ async def llm_call(prompt: str, *, system: Optional[str], effort: str, max_token
     n429 = nother = 0
     while True:
         try:
-            await LIMITER.wait()
-            return await _complete(msgs, effort=effort, max_tokens=max_tokens)
+            await _limiter(model).wait()
+            return await _complete(msgs, effort=effort, max_tokens=max_tokens, model=model)
         except Exception as e:  # noqa: BLE001 - provider errors vary
             last = e
             msg = str(e).lower()
@@ -739,7 +765,7 @@ async def judge(rec: Dict[str, Any], response: str, ledger: Ledger, stub: bool, 
         qtype = "temporal-reasoning" if rec["category"] == "temporal" else "single-session-user"
         jobs.append(("j_strict", lme_judge_prompt(qtype, rec["question"], rec["answer"], response), None,
                      parse_yes_no))
-        if rec["arm"] in LENIENT_ARMS or rec["arm"].startswith("decoy:"):
+        if base_arm(rec["arm"]) in LENIENT_ARMS or rec["arm"].startswith("decoy:"):
             jobs.append(("j_lenient", mem0_judge_prompt(rec["question"], rec["answer"], response),
                          MEM0_JUDGE_SYSTEM, parse_label))
     for name, prompt, system, parse in jobs:
@@ -763,30 +789,35 @@ async def judge(rec: Dict[str, Any], response: str, ledger: Ledger, stub: bool, 
 async def answer_one(rec: Dict[str, Any], ledger: Ledger, stub: bool, sem) -> Dict[str, Any]:
     prompt = ANSWER_PROMPT.format(memories=rec["context"], date_line=rec.get("date_line", ""),
                                   question=rec["question"])
+    reader = READERS[rec["reader"]] if rec.get("reader") else None  # prereg v5; None = MODEL
     async with sem:
         t = time.perf_counter()
         text, usage = await llm_call(prompt, system=None, effort="low", max_tokens=ANSWER_MAX_TOKENS,
-                                     stub=_stub_answer(rec["context"]) if stub else None)
-    ledger.add({"arm": rec["arm"], "qid": rec["qid"], "call": "answer", "usage": usage, "cost": _cost(usage),
+                                     stub=_stub_answer(rec["context"]) if stub else None, model=reader)
+    ledger.add({"arm": rec["arm"], "qid": rec["qid"], "call": "answer", "model": reader or MODEL,
+                "usage": usage, "cost": _cost(usage),
                 "ms": round(1000 * (time.perf_counter() - t)), "parsed": bool(text)})
     fallback = False
     if not text and not stub:  # prereg v3: thinking ran to the cap with no reply -> ask once without thinking
         fallback = True
         async with sem:
             t = time.perf_counter()
-            text, usage2 = await llm_call(prompt, system=None, effort="minimal", max_tokens=512, stub=None)
+            text, usage2 = await llm_call(prompt, system=None, effort="minimal", max_tokens=512, stub=None,
+                                          model=reader)
         ledger.add({"arm": rec["arm"], "qid": rec["qid"], "call": "answer_fallback", "usage": usage2,
                     "cost": _cost(usage2), "ms": round(1000 * (time.perf_counter() - t)), "parsed": bool(text)})
     verdicts = await judge(rec, text, ledger, stub, sem)
     return {"arm": rec["arm"], "bench": rec["bench"], "qid": rec["qid"], "split": rec.get("split"),
             "category": rec["category"], "abstention": rec["abstention"], "response": text,
-            "answer_fallback": fallback,
+            "answer_fallback": fallback, **({"reader": rec["reader"]} if rec.get("reader") else {}),
             "in_tokens": usage["in"], "retrieval_ms": rec.get("retrieval_ms"), **verdicts}
 
 
 async def cmd_answer(args) -> None:
     global LIMITER, ERROR_LOG
     LIMITER = RateLimiter(args.rpm)
+    READER_RPM[0] = getattr(args, "reader_rpm", 6.0)
+    READER_LIMITERS.clear()
     run = Path(args.run)
     ERROR_LOG = run / "errors.jsonl"
     tag = "stub" if args.stub else "live"
@@ -1060,6 +1091,8 @@ def main() -> None:
             p.add_argument("--arms", default="")
             p.add_argument("--split", default="")
             p.add_argument("--per-arm", type=int, default=0, help="pilot: N items per (bench, arm)")
+            p.add_argument("--reader-rpm", type=float, default=6.0,
+                           help="prereg v5: request ceiling per reader model (the judge uses --rpm)")
         if name == "answer-loop":
             p.add_argument("--probe-every", type=float, default=300, help="seconds between quota probes")
             p.add_argument("--max-hours", type=float, default=24 * 21, help="give up after this long")
