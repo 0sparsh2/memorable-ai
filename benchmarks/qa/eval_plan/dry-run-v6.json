@@ -1,0 +1,12 @@
+{
+ "CHECK: price-table": "ok ($0; NIM free tier)",
+ "CHECK: input-shapes": "ok (LoCoMo-dev 347 questions x A3g, A7, D7)",
+ "CHECK: log-isolation": "ok (A7 minus its log == A3g on 347/347)",
+ "CHECK: decoy-derangement": "ok (D7's log is the other dev conversation's on 347/347; its excerpts == A3g on 347/347)",
+ "CHECK: a3-rebuild-identity": "ok (A3 rebuilt with current code == stored A3 on conv-48, 191/191)",
+ "CHECK: observer-calls": "ok (stub: one call per closed episode; conv-48 46 episodes / 30 sessions, conv-49 48 / 25 = 1.53 and 1.92 per session)",
+ "CHECK: memory": "ok (peak RSS 800 MB for two LoCoMo conversations)",
+ "CHECK: split-disjointness": "ok (dev rows only: conv-48, conv-49; LME dev 150)",
+ "pending": "LME-dev build shapes and observer thinking default: checked in the pilot",
+ "DRY_RUN_RESULT": "pass"
+}

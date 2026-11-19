@@ -1,6 +1,6 @@
 # Preregistration v6 (DRAFT): the observation log, end to end
 
-**Status:** draft, 2026-11-19. It freezes when its pilot starts, after v5 has chosen the answer model. It is a new eval beside v3–v5, whose arms and answers are untouched.
+**Status:** draft, 2026-11-19; dry run passed ([dry-run-v6.json](dry-run-v6.json)). It freezes when its pilot starts, after v5 has chosen the answer model. It is a new eval beside v3–v5, whose arms and answers are untouched.
 
 **Why.** Every LongMemEval leader compresses the whole history with an LLM instead of retrieving raw excerpts. Mastra's observational memory reports 94.87% with gpt-5-mini answering (84.23% with gpt-4o); its context averaged ~30k tokens of dated observations ([docs/observation_memory.md](../../../docs/observation_memory.md)). Memorable now has an observer (one LLM call per closed episode) and an observation log in context (commit aee0fd1). v6 measures it on the iteration slice that v5 defined.
 
@@ -14,7 +14,7 @@ Primary metric and CIs as in v3: LLM-judge accuracy; 95% paired bootstrap over q
 |---|---|---|---|---|
 | B15 | A7 (log) − A3g, LoCoMo-dev J-strict and LME-dev J, paired | ≥ +2.0 pts with CI > 0 on one; no drop > 1.0 on the other | higher | The log does not pay off over retrieval at this answer model. Keep the observer opt-in |
 | B16 | Decoy D7 (another conversation's log) − A3g | ≤ +1.0 pt on both | lower | A7's gain would come from the format or the extra tokens, not from this user's observations |
-| B17 | Observer cost | ≤ 1.5 LLM calls per session; ≤ 2% replies unparseable after salvage; no thinking text | lower | Too costly or unreliable for the default write path |
+| B17 | Observer cost | ≤ 2.5 LLM calls per session (v4's budget for fact extraction); ≤ 2% replies unparseable after salvage; no thinking text | lower | Too costly or unreliable for the default write path |
 | B18 | A3g − A3 (the G2 walk, LLM-free ingest), both benchmarks | no drop > 1.0 on either (report the gain) | higher | The walk changes answers for the worse on sparse graphs: default it off without an LLM |
 
 **Reported, no bar:**
@@ -37,7 +37,7 @@ All answered by `<READER>` with v3's prompt and settings, judged by v3's judge.
 
 **Observer model:** `nvidia/nemotron-3-ultra-550b-a55b` on NIM's free tier, temperature 0. Whether it thinks by default is checked in the dry run: thinking is switched off for the observer if it does.
 
-**Questions:** LoCoMo-dev (conv-48, conv-49: 347) and LME-dev (150). D7: 50 LoCoMo-dev and 48 LME-dev questions, stratified (seed 20261121).
+**Questions:** LoCoMo-dev (conv-48, conv-49: 347) and LME-dev (150), for every arm including D7.
 
 ## Baseline arm
 
@@ -74,4 +74,4 @@ As in v3. The log uses neutral headings ("Observation log", "Retrieved excerpts"
 
 - **Observer:** LoCoMo-dev ~94 episodes (94 calls); LME-dev 150 haystacks × ~50 sessions ≈ 7.5–10k calls. At Ultra's 6 requests/min that is ~21–28 h.
 - **Local ingest:** 150 LME-dev haystacks twice (LLM-free for A3g, and the observer's own), about 3–5 h of CPU.
-- **Answers:** A3g, A7 (497 each), D7 (98), drift 60: about 1,150 answers, and about 2,000 judge calls on Lightning (~8 h).
+- **Answers:** A3g, A7 and D7 (497 each) plus 60 for the drift check: about 1,550 answers, and about 2,600 judge calls on Lightning (~11 h).

@@ -556,10 +556,12 @@ async def cmd_retrieve(args) -> None:
     groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for it in items:
         groups[it["group"]].append(it)
-    _GROUP_ORDER[args.bench] = sorted(groups)
     keys = list(groups)[: args.limit] if args.limit else list(groups)
-    if args.groups:  # explicit group ids (pilot)
+    if args.groups:  # explicit group ids (pilot, or prereg v6's dev slice)
         keys = [k for k in keys if k in set(args.groups.split(","))]
+    # decoys take "the next conversation" within the selected groups (v6: conv-48 <-> conv-49);
+    # a run without --groups keeps v4's order over every group
+    _GROUP_ORDER[args.bench] = sorted(keys) if args.groups else sorted(groups)
     suffix = ""
     if args.shard:  # "i/n": this process takes every n-th group (parallel workers, one per GPU)
         i, n = (int(x) for x in args.shard.split("/"))
