@@ -278,6 +278,54 @@ class MemoryExtractor:
                   else 'Refer to the user as "User"'),
         )
         items = await self._call_llm_json(prompt, max_tokens=min(6000, 800 + 200 * len(turns)))
+        return self._observations(items, turns, lambda idxs: ref_date)
+
+    async def observe_batch(
+        self,
+        turns: Sequence[Dict[str, Any]],
+        prior_log: str = "",
+        user_name: Optional[str] = None,
+        max_tokens: int = 16000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Dated observations of many closed episodes in one call (Mastra's observer batches ~30k
+        tokens of messages). Messages are grouped under their dates; each observation is dated
+        by the first message it cites. LLM only.
+        """
+        from memorable_ai.core.llm_client import llm_enabled
+
+        turns = [t for t in turns if _turn_text(t).strip()]
+        if not turns or not (llm_enabled(self.llm_model) or self.llm_client is not None):
+            return []
+        fallback = _first_time(turns) or utcnow()
+        lines: List[str] = []
+        block = None
+        for i, t in enumerate(turns):
+            when = t.get("occurred_at")
+            head = when.strftime("%Y-%m-%d (%A)") if isinstance(when, datetime) else "date unknown"
+            if head != block:
+                block = head
+                lines.append(f"--- {head} ---")
+            lines.append(f"[{i}] {t.get('role', 'user')}: {_turn_text(t)[:2000]}")
+        prompt = OBSERVATION_BATCH_PROMPT.format(
+            log=prior_log.strip() or "(empty)",
+            turns="\n".join(lines),
+            user=(f'The user is {user_name}: refer to them as "{user_name}"' if user_name
+                  else 'Refer to the user as "User"'),
+        )
+
+        def dated(idxs: List[int]) -> datetime:
+            for i in idxs:
+                if isinstance(turns[i].get("occurred_at"), datetime):
+                    return turns[i]["occurred_at"]
+            return fallback
+
+        # a long reply takes minutes (~70 tokens/s on NIM): the timeout grows with the output budget
+        items = await self._call_llm_json(prompt, max_tokens=max_tokens, timeout=max(120, max_tokens // 40))
+        return self._observations(items, turns, dated)
+
+    def _observations(self, items: Any, turns: Sequence[Dict[str, Any]], when) -> List[Dict[str, Any]]:
+        """Observer reply -> observation memories. ``when(turn indices)`` dates each one."""
         if isinstance(items, dict):
             items = items.get("observations") or [items]
         out: List[Dict[str, Any]] = []
@@ -286,13 +334,14 @@ class MemoryExtractor:
                 continue
             prio = str(it.get("priority", "medium")).lower()
             prio = prio if prio in PRIORITY_IMPORTANCE else "medium"
+            idxs = [i for i in (it.get("turns") or []) if isinstance(i, int) and 0 <= i < len(turns)]
+            ref_date = when(idxs)
             meta: Dict[str, Any] = {"source": "llm", "extraction_method": "observer", "priority": prio,
                                     "stated_at": ref_date.isoformat()}
             if it.get("event_date") and str(it["event_date"]).lower() != "null":
                 meta["event_date"] = str(it["event_date"])[:10]
             mem: Dict[str, Any] = {"content": str(it["content"]).strip(), "type": "observation", "metadata": meta,
                                    "valid_from": ref_date, "importance_score": PRIORITY_IMPORTANCE[prio]}
-            idxs = [i for i in (it.get("turns") or []) if isinstance(i, int) and 0 <= i < len(turns)]
             ids = [turns[i]["id"] for i in idxs if turns[i].get("id") is not None]
             if ids:
                 mem["source_turn_ids"] = ids
@@ -483,7 +532,7 @@ class MemoryExtractor:
             out.append(mem)
         return out
 
-    async def _call_llm_json(self, prompt: str, max_tokens: int = 800) -> Any:
+    async def _call_llm_json(self, prompt: str, max_tokens: int = 800, timeout: Optional[int] = None) -> Any:
         try:
             if self.llm_model:
                 from memorable_ai.core import llm_client
@@ -495,6 +544,7 @@ class MemoryExtractor:
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=max_tokens,
                     temperature=0,
+                    **({"timeout": timeout} if timeout else {}),
                 )
                 raw = llm_client.message_content(resp)
             elif self.llm_client is not None:
@@ -610,6 +660,33 @@ Rules:
 - Skip greetings and small talk with no content. Return [] if there is nothing. Output JSON only.
 """
 
+
+OBSERVATION_BATCH_PROMPT = """You keep a dated observation log of a user's conversations with an assistant. The log
+replaces the raw conversation: later questions will be answered from it alone.
+
+The log so far (latest lines; do not repeat them, but say when something below changes them):
+{log}
+
+New messages, oldest first, under the date each was sent:
+{turns}
+
+Return a JSON array of observations of the new messages. Each item:
+{{"content": "one standalone observation", "priority": "high|medium|low",
+  "event_date": "YYYY-MM-DD or null", "entities": ["names in it"], "turns": [message indices]}}
+
+Rules:
+- {user} and use full names for other people.
+- Record everything a later question could ask about: events and when they happened, plans, decisions,
+  preferences and opinions, possessions, people and relationships, numbers, places, and what the
+  assistant said, recommended or did ("Assistant recommended ...").
+- Resolve pronouns and relative dates into names and calendar dates, using the date of the message they
+  appear in. event_date is when the event happened, which can differ from the message date.
+- Keep specifics (names, titles, quantities, brands); do not generalise. Cover every date block.
+- When something changes an earlier state, say so ("User moved from Boston to Denver").
+- priority: high = what matters about the user later (identity, health, relationships, commitments,
+  changes); medium = events, plans and preferences; low = passing details.
+- Skip greetings and small talk with no content. Return [] if there is nothing. Output JSON only.
+"""
 
 def _mem(content: str, mtype: str, **meta: Any) -> Dict[str, Any]:
     return {"content": content, "type": mtype, "metadata": {"extraction_method": "pattern", **meta}}

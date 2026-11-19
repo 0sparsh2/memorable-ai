@@ -67,6 +67,7 @@ class WritePipeline:
         tasks: Optional[Any] = None,
         facts: bool = True,
         observations: bool = False,
+        observe_batch_tokens: int = 0,
     ):
         self.storage = storage
         self.extractor = extractor
@@ -80,6 +81,9 @@ class WritePipeline:
         self.tasks = tasks  # TaskTracker (procedural P1b)
         self.facts = facts  # fact extraction on (off: only the observer writes memories)
         self.observations = observations  # the observer at episode close (docs/observation_memory.md)
+        # 0: one observer call per closed episode. N > 0: closed episodes queue until their messages
+        # reach N tokens, then one call observes them all (Mastra batches ~30k tokens)
+        self.observe_batch_tokens = max(0, int(observe_batch_tokens or 0))
 
     async def ingest(
         self,
@@ -223,7 +227,11 @@ class WritePipeline:
             except Exception as e:
                 logger.debug("Session summary update failed: %s", e)
         if self.observations:
-            await self._observe(episode_id, scope, report)
+            if self.observe_batch_tokens:
+                self._flag_episodes([episode_id], observe_pending=True)
+                await self.observe_pending(scope, report)
+            else:
+                await self._observe(episode_id, scope, report)
         if self.timing == "episode" and self.facts:
             turns = self.episodic.episode_turns(episode_id)
             for t in turns:
@@ -263,15 +271,101 @@ class WritePipeline:
         for o in obs:
             o.update(user_id=scope.user_id, session_id=scope.session_id, source="conversation",
                      source_episode_id=episode_id)
-            if scope.agent_id:
-                o.setdefault("agent_id", scope.agent_id)
-            stored = self.updater._add(o)
-            if stored.get("op") != "add":
-                continue
-            report.facts.append(stored)
-            if self.knowledge_graph is not None:
-                ingest = getattr(self.knowledge_graph, "aingest_memory", None)
-                await ingest(stored, scope) if ingest else self.knowledge_graph.ingest_memory(stored, scope)
+            await self._store_observation(o, scope, report)
+        self._flag_episodes([episode_id], observed=True)
+
+    async def _store_observation(self, o: Dict[str, Any], scope: Scope, report: IngestReport) -> None:
+        if scope.agent_id:
+            o.setdefault("agent_id", scope.agent_id)
+        stored = self.updater._add(o)
+        if stored.get("op") != "add":
+            return
+        report.facts.append(stored)
+        if self.knowledge_graph is not None:
+            ingest = getattr(self.knowledge_graph, "aingest_memory", None)
+            await ingest(stored, scope) if ingest else self.knowledge_graph.ingest_memory(stored, scope)
+
+    def _flag_episodes(self, ids: Sequence[int], **flags: Any) -> None:
+        """Set (or, with None, clear) keys in the episodes' metadata."""
+        from memorable_ai.core.models import Episode
+
+        session = self.storage.get_session()
+        try:
+            for ep in session.query(Episode).filter(Episode.id.in_(list(ids))).all():
+                meta = dict(ep.extra_metadata or {})
+                for k, v in flags.items():
+                    if v is None:
+                        meta.pop(k, None)
+                    else:
+                        meta[k] = v
+                ep.extra_metadata = meta
+            session.commit()
+        finally:
+            session.close()
+
+    def _pending_episodes(self, scope: Scope) -> List[int]:
+        """Closed episodes of this user queued for the batched observer, oldest first."""
+        from memorable_ai.core.models import Episode
+
+        session = self.storage.get_session()
+        try:
+            q = session.query(Episode.id, Episode.extra_metadata).filter(Episode.status == "closed")
+            q = q.filter(Episode.user_id == scope.user_id if scope.user_id is not None else Episode.user_id.is_(None))
+            if self.storage.namespace:
+                q = q.filter(Episode.namespace == self.storage.namespace)
+            rows = q.order_by(Episode.start_time, Episode.id).all()
+        finally:
+            session.close()
+        return [i for i, meta in rows if (meta or {}).get("observe_pending")]
+
+    async def observe_pending(self, scope: Scope, report: Optional[IngestReport] = None,
+                              force: bool = False) -> int:
+        """
+        Batched observer: observe the queued episodes in calls of at least ``observe_batch_tokens``
+        message tokens (``force``: the remainder too). Returns the number of observer calls.
+        """
+        from memorable_ai.core.context import estimate_tokens, render_observation_log
+
+        observe = getattr(self.extractor, "observe_batch", None)
+        if observe is None or self.episodic is None:
+            return 0
+        report = report or IngestReport(session_id=scope.session_id, user_id=scope.user_id)
+        batches: List[List[Any]] = []
+        cur: List[Any] = []
+        size = 0
+        for eid in self._pending_episodes(scope):
+            turns = [t for t in self.episodic.episode_turns(eid) if t.get("event_kind", "message") == "message"]
+            cur.append((eid, turns))
+            size += sum(estimate_tokens(t.get("content") or "") for t in turns)
+            if size >= max(1, self.observe_batch_tokens):
+                batches.append(cur)
+                cur, size = [], 0
+        if cur and force:
+            batches.append(cur)
+        for batch in batches:
+            turns, origin = [], {}
+            for eid, ts in batch:
+                for t in ts:
+                    if isinstance(t.get("occurred_at"), str):
+                        t["occurred_at"] = datetime.fromisoformat(t["occurred_at"])
+                    origin[t.get("id")] = (eid, t.get("session_id"))
+                    turns.append(t)
+            prior = await self.storage.get_memories(memory_type="observation", limit=100_000,
+                                                    scope_user=scope.user_id)
+            prior = sorted(prior, key=lambda m: m.get("id") or 0)[-120:]
+            try:
+                obs = await observe(turns, prior_log=render_observation_log(prior, max_tokens=1500),
+                                    user_name=self._user_name(scope))
+            except Exception as e:  # noqa: BLE001 - the log is additive; the batch stays queued
+                logger.warning("Observer failed for %d queued episodes: %s", len(batch), e)
+                return batches.index(batch)
+            for o in obs:
+                eid, sid = origin.get((o.get("source_turn_ids") or [None])[0], (batch[0][0], scope.session_id))
+                o.update(user_id=scope.user_id, session_id=sid or scope.session_id, source="conversation",
+                         source_episode_id=eid)
+                await self._store_observation(o, scope, report)
+            self._flag_episodes([eid for eid, _ in batch], observe_pending=None, observed=True)
+        return len(batches)
 
     async def _apply(
         self,

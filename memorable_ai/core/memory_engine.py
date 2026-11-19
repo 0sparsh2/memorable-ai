@@ -249,6 +249,7 @@ class MemoryEngine:
             tasks=self._tasks,
             facts=ext_cfg.facts,
             observations=ext_cfg.observations,
+            observe_batch_tokens=ext_cfg.observe_batch_tokens,
         )
         if cfg.graph.enabled and cfg.graph.connection_string:
             from memorable_ai.graph.builder import GraphBuilder
@@ -564,6 +565,17 @@ class MemoryEngine:
         if self._mode_handler is not None and hasattr(self._mode_handler, "clear_session"):
             self._mode_handler.clear_session(scope.session_id, scope)
         return report.as_dict()
+
+    async def flush_observations(self, user_id: Optional[str] = None) -> int:
+        """
+        Batched observer (``extraction.observe_batch_tokens`` > 0): observe the user's queued
+        episodes now, below the threshold too. Call it after a bulk import or when a user's
+        conversations are over. Returns the number of observer calls.
+        """
+        self._ensure_components()
+        if not self._pipeline.observations:
+            return 0
+        return await self._pipeline.observe_pending(self.resolve_scope(user_id, None), force=True)
 
     async def add_memory(
         self,

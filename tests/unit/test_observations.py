@@ -122,3 +122,96 @@ async def test_get_context_shows_the_log_once(eng):
     ctx = await r.get_context([{"role": "user", "content": "What is my beagle called?"}], Scope(user_id="u"))
     assert "Observation log (oldest first):" in ctx and "Biscuit" in ctx
     assert ctx.count("User adopted a beagle named Biscuit") == 1
+
+
+class BatchLLM:
+    """Batched observer: one observation per date block, citing that block's first message."""
+
+    def __init__(self):
+        self.prompts = []
+
+    def __call__(self, prompt):
+        import re
+
+        self.prompts.append(prompt)
+        if "New messages, oldest first" not in prompt:
+            return "[]"
+        return json.dumps([{"content": f"User did something on {d}", "priority": "high", "turns": [int(i)]}
+                           for d, i in re.findall(r"--- (\d{4}-\d{2}-\d{2}) \(\w+\) ---\n\[(\d+)\]", prompt)])
+
+
+@pytest.fixture
+def beng(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMORABLE_LLM__DEFAULT_MODEL", "none")
+    monkeypatch.setenv("MEMORABLE_LLM__EMBEDDING_MODEL", "hash")
+    monkeypatch.setenv("MEMORABLE_LLM__TURN_EMBEDDING_MODEL", "none")
+    from memorable_ai import MemoryEngine
+
+    e = MemoryEngine(database=f"sqlite:///{tmp_path / 'batch.db'}", write_mode="sync")
+    e._ensure_components()
+    e._extraction.llm_model, e._extraction.llm_client = None, BatchLLM()
+    e._pipeline.observations, e._pipeline.facts = True, False
+    e._pipeline.observe_batch_tokens = 300  # each session below is ~200 tokens of messages
+    yield e
+    e.close()
+
+
+async def long_session(eng, sid, day):
+    from datetime import datetime
+
+    pad = " We talked about it for a long while and covered many small details along the way."
+    msgs = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"Message {i} of session {sid}.{pad * 2}"}
+            for i in range(4)]
+    await eng.ingest(msgs, None, user_id="u", session_id=sid, occurred_at=datetime(2024, 3, day, 10))
+    await eng.end_session(user_id="u", session_id=sid)
+
+
+def observations(eng):
+    s = eng._storage.get_session()
+    try:
+        return [(m.content, m.session_id, m.source_episode_id, (m.extra_metadata or {}).get("stated_at", "")[:10])
+                for m in s.query(Memory).filter(Memory.memory_type == "observation").order_by(Memory.id)]
+    finally:
+        s.close()
+
+
+@pytest.mark.asyncio
+async def test_batched_observer_waits_for_the_threshold_then_observes_the_queue(beng):
+    llm = beng._extraction.llm_client
+    await long_session(beng, "s1", 3)
+    assert not llm.prompts and not observations(beng), "one session is below the threshold: queued"
+    await long_session(beng, "s2", 10)
+    assert len(llm.prompts) == 1, "both queued sessions in one call"
+    assert "--- 2024-03-03 (Sunday) ---" in llm.prompts[0] and "--- 2024-03-10 (Sunday) ---" in llm.prompts[0]
+    obs = observations(beng)
+    assert [(c, s, d) for c, s, _, d in obs] == [("User did something on 2024-03-03", "s1", "2024-03-03"),
+                                                 ("User did something on 2024-03-10", "s2", "2024-03-10")]
+    assert obs[0][2] != obs[1][2], "each observation points at the episode of the message it cites"
+
+
+@pytest.mark.asyncio
+async def test_flush_observes_the_rest_with_the_log_so_far(beng):
+    llm = beng._extraction.llm_client
+    for sid, day in (("s1", 3), ("s2", 10), ("s3", 20)):
+        await long_session(beng, sid, day)
+    assert len(llm.prompts) == 1 and len(observations(beng)) == 2
+    assert await beng.flush_observations(user_id="u") == 1
+    assert len(llm.prompts) == 2
+    last = llm.prompts[1]
+    assert "Message 0 of session s3" in last and "Message 0 of session s1" not in last, "only new messages"
+    assert "User did something on 2024-03-03" in last.split("New messages")[0], "the log so far is shown"
+    assert observations(beng)[-1][1:] [::2] == ("s3", "2024-03-20")
+    assert await beng.flush_observations(user_id="u") == 0, "nothing left in the queue"
+
+
+@pytest.mark.asyncio
+async def test_per_episode_mode_marks_episodes_observed(eng):
+    from memorable_ai.core.models import Episode
+
+    await session(eng)
+    s = eng._storage.get_session()
+    try:
+        metas = [e.extra_metadata or {} for e in s.query(Episode).all()]
+    finally:
+        s.close()
+    assert metas and all(m.get("observed") for m in metas)

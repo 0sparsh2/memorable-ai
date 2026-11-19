@@ -1,6 +1,6 @@
 # Observation log: design note (2026-11-19)
 
-**Status:** design for a future preregistered arm (A7). Its prereg is written after prereg v5 picks the answer model, because the answer model changes what the arm can show.
+**Status:** built (commit aee0fd1, opt-in) and under test as arm A7 of [prereg v6](../benchmarks/qa/eval_plan/prereg-v6.md), frozen 2026-11-19. The batched observer below is built too, and not yet measured end to end.
 
 ## Why
 
@@ -31,7 +31,16 @@ It fits the layers we already have, without a new store:
 - **Context assembly (L4).** The log goes in whole while it fits the budget, oldest first. Beyond the budget, the most recent observations stay in whole and older ones are retrieved (the G2 graph walk plus fusion). That hybrid is the third option: Mastra's own design has no answer for a history whose log outgrows the window.
 - **Verbatim turns stay available.** A small top-k of retrieved turns (A3) follows the log for exact wording. Observations lose detail at 6× compression, and turns cover it.
 
-## The eval arm (to preregister after v5)
+## Batched observer (`extraction.observe_batch_tokens`, 2026-11-19)
+
+NIM's free tier limits requests per model (about 4–6 a minute sustained), not tokens. One observer call per closed episode is about 85 calls per LongMemEval haystack, so observing the 350 held-out haystacks would take 60–80 hours on Ultra. Mastra's observer runs once per ~30k tokens of unobserved messages instead, about 4 calls per haystack.
+
+- **Setting:** `observe_batch_tokens = 0` (the default) keeps one call per episode. With N > 0, a closed episode joins a queue (`observe_pending` in its metadata), and once the queued messages reach N tokens one call observes them all. `MemoryEngine.flush_observations(user_id)` observes what is left: after a bulk import, or when a user's conversations are over.
+- **Prompt:** messages are grouped under their dates, and each observation is dated by the first message it cites, so a batch that spans weeks still dates every line. The call also sees the latest ~1.5k tokens of the log, so it can say what changed instead of repeating it.
+- **Cost:** the timeout grows with the output budget (16k tokens, up to 400 s), because one call now writes what 20 calls wrote.
+- **Unmeasured so far:** whether a large batch keeps the detail of per-episode calls. `benchmarks/qa/observer_batch.py` compares them on LoCoMo-dev without answers (evidence cited, short answers contained, log size); the answer-level test is an arm beside A7 once v6 has reported.
+
+## The eval arm (preregistered as v6)
 
 - **A7 = observation log (whole, within budget) + A3's top 10 turns**, answered by v5's chosen model on the iteration slice (LoCoMo conv-48/49 and LongMemEval dev 150).
 - **Baselines:** A3 and A0 on the same answer model. **Decoy:** another haystack's log, as D5 did for facts.

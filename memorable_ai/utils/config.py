@@ -55,6 +55,12 @@ class ExtractionConfig(BaseModel):
         description="Observer: one LLM call per closed episode writes dated observations for the "
         "observation log (docs/observation_memory.md). Needs an LLM; opt-in until measured",
     )
+    observe_batch_tokens: int = Field(
+        default=0,
+        description="0: one observer call per closed episode. N > 0: closed episodes queue until their "
+        "messages reach N tokens and one call observes them all (fewer calls; MemoryEngine.flush_observations "
+        "observes the rest)",
+    )
 
 
 class RetrievalConfig(BaseModel):
