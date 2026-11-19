@@ -25,7 +25,6 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from benchmarks.qa.e2e_qa import LOCOMO_DEV, READERS  # noqa: E402
-from benchmarks.qa.v5_build import stratified  # noqa: E402
 
 RUNS = ROOT / "benchmarks" / "qa" / "runs"
 SRC, V5 = RUNS / "v6", RUNS / "v5"
@@ -51,19 +50,41 @@ def v6_rows(bench: str) -> dict:
     return out
 
 
+def stratified_exact(items, n: int, seed: int, key) -> list:
+    """Exactly n items, allocated to categories by largest remainder, shuffled within each (sorted qids)."""
+    by = defaultdict(list)
+    for it in items:
+        by[key(it)].append(it)
+    total = sum(len(v) for v in by.values())
+    quota = {k: n * len(v) / total for k, v in by.items()}
+    alloc = {k: int(q) for k, q in quota.items()}
+    for k in sorted(quota, key=lambda k: (-(quota[k] - alloc[k]), str(k)))[: n - sum(alloc.values())]:
+        alloc[k] += 1
+    rng = random.Random(seed)
+    picked = []
+    for k, group in sorted(by.items(), key=lambda kv: str(kv[0])):
+        group = sorted(group, key=lambda r: r["qid"])
+        rng.shuffle(group)
+        picked += group[: alloc[k]]
+    return picked
+
+
 def drift_rows(bench: str, reader: str) -> list:
     """The A3 contexts v5 answered with this reader, sampled for the drift check."""
     a3 = [r for r in map(json.loads, open(V5 / f"contexts_{bench}.jsonl"))
           if r["arm"] == f"A3@{reader}" and dev(bench, r)]
-    return stratified(a3, DRIFT[bench], V6_SEED, key=lambda r: r["category"])
+    return stratified_exact(a3, DRIFT[bench], V6_SEED, key=lambda r: r["category"])
 
 
-def build(reader: str, pilot: bool) -> dict:
+def build(reader: str, pilot: bool, only=None) -> dict:
+    """``only``: the arms to queue (the rest are left for a later --append)."""
     out, missing = {}, []
     rng = random.Random(V6_SEED)
     for bench in ("locomo", "lme"):
         cells = v6_rows(bench)
         cells["A3r"] = drift_rows(bench, reader)
+        if only:
+            cells = {a: rows for a, rows in cells.items() if a in only}
         recs = []
         for arm, rows in sorted(cells.items()):
             want = DRIFT[bench] if arm == "A3r" else EXPECTED[bench]
@@ -74,7 +95,7 @@ def build(reader: str, pilot: bool) -> dict:
             elif len(rows) != want:
                 missing.append(f"{bench}/{arm}: {len(rows)} of {want}")
             recs += [{**r, "arm": f"{arm}@{reader}", "reader": reader} for r in rows]
-        for arm in ARMS:
+        for arm in (a for a in ARMS if not only or a in only):
             if arm not in cells:
                 missing.append(f"{bench}/{arm}: not built")
         out[bench] = recs
@@ -87,8 +108,11 @@ def main() -> None:
     ap.add_argument("--run", required=True)
     ap.add_argument("--pilot", action="store_true", help="3 rows per cell, from whatever is built")
     ap.add_argument("--force", action="store_true", help="overwrite an existing queue")
+    ap.add_argument("--arms", default="", help="only these arms (A3g,A7,D7,A3r); the others can be --append-ed later")
+    ap.add_argument("--append", action="store_true", help="add these arms to an existing queue")
     args = ap.parse_args()
-    res = build(args.reader, args.pilot)
+    only = set(args.arms.split(",")) - {""} or None
+    res = build(args.reader, args.pilot, only)
     if res["missing"] and not args.pilot:
         raise SystemExit("v6 contexts incomplete:\n  " + "\n  ".join(res["missing"]))
     run = Path(args.run)
@@ -96,8 +120,14 @@ def main() -> None:
     manifest = {"reader": args.reader, "pilot": args.pilot, "missing": res["missing"], "cells": {}}
     for bench, recs in res["recs"].items():
         path = run / f"contexts_{bench}.jsonl"
-        if path.exists() and not args.force:
-            raise SystemExit(f"{path} exists; pass --force to rebuild it")
+        have = [json.loads(line) for line in open(path)] if path.exists() else []
+        if have and not (args.force or args.append):
+            raise SystemExit(f"{path} exists; pass --append to add arms or --force to rebuild it")
+        if args.append:
+            queued = {r["arm"] for r in have}
+            if any(r["arm"] in queued for r in recs) or any(r.get("reader") != args.reader for r in have):
+                raise SystemExit(f"{path}: these arms are already queued, or the queue has another reader")
+            recs = have + recs
         with open(path, "w") as f:
             for r in recs:
                 f.write(json.dumps(r) + "\n")
