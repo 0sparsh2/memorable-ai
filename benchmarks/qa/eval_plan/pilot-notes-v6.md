@@ -44,3 +44,9 @@ Prereg v6 was frozen and committed before this pilot wrote anything. The observe
 - Timed: the five pilot haystacks above (wall clock, `retrieve --arms A7 --parallel 2 --llm-rpm 6`). The limit is NIM's per-model request rate on Ultra; the local ingest is about 4 s of CPU per session.
 - Answers (after v5 names the reader): A3g, A7 and D7 on 497 questions each plus the 60-question drift check, 1,551 answers and about 2,250 judge calls on Lightning. At the judge's 4–6 calls/min, 7–10 h.
 - D7 needs every log, so it is built in a second pass once the A7 pass has finished.
+
+## Approval and full run
+
+On 2026-11-19 the owner approved the full run as preregistered, and chose the judge order: v6's answers before the paused v3/v4 loop resumes. The observer ingest started at 14:13 EST (`runs/v6/full_build.log`, pid in `full_build.pid`): an A7 pass over LoCoMo-dev and the 150 LME-dev haystacks (the pilot's six logs are reused from the cache), then a D7 pass, which needs every log. Same settings as the pilot: Ultra, thinking off, 6 requests/min offered, 2 haystacks in parallel.
+
+Prereg v6.1 (the batched observer) is not run: its rule picked no batch size (`prereg-v6.1.md`).
