@@ -631,10 +631,11 @@ def _limiter(model: Optional[str]) -> RateLimiter:
 ERROR_LOG: Optional[Path] = None  # every failed attempt, timestamped (set by the answer stage)
 
 
-def _log_error(kind: str, err: Exception, attempt: int) -> None:
+def _log_error(kind: str, err: Exception, attempt: int, model: Optional[str] = None) -> None:
     if ERROR_LOG is not None:
         with open(ERROR_LOG, "a") as f:
             f.write(json.dumps({"ts": round(time.time(), 1), "kind": kind, "attempt": attempt,
+                                "model": model or MODEL,
                                 "error": f"{type(err).__name__}: {str(err)[:160]}"}) + "\n")
 
 
@@ -702,7 +703,7 @@ async def llm_call(prompt: str, *, system: Optional[str], effort: str, max_token
         except Exception as e:  # noqa: BLE001 - provider errors vary
             last = e
             msg = str(e).lower()
-            _log_error("call", e, n429 + nother)
+            _log_error("call", e, n429 + nother, model)
             if ("429" in msg or "too many requests" in msg or "rate" in msg) and n429 < len(waits_429):
                 await asyncio.sleep(waits_429[n429])
                 n429 += 1
