@@ -13,7 +13,7 @@ over LoCoMo questions with gold evidence:
 Dev rows only (prereg v5 split: conv-48, conv-49). The per-episode log is read from the v6 run's
 observer cache; batched logs are built fresh on Ultra (thinking off), as the v6 observer is.
 
-    python -m benchmarks.qa.observer_batch --conv conv-48 --tokens 4000,12000,30000
+    python -m benchmarks.qa.observer_batch --conv conv-48 --tokens 8000,12000,20000
 """
 
 from __future__ import annotations
@@ -85,6 +85,33 @@ def score(db: Path, sample: dict, conv: str) -> dict:
             "contains": round(100 * sum(cont) / len(cont), 1), "contains_n": len(cont), "rows": rows}
 
 
+def score_lme(db: Path, item: dict) -> dict:
+    """LongMemEval: is every evidence turn (``has_answer``) cited, and does one observation hold the answer?"""
+    from memorable_ai.core.context import estimate_tokens, render_observation_log
+
+    x = item["_x"]
+    c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    gold, uid = set(), item["group"]
+    for sid, sess in zip(x["haystack_session_ids"], x["haystack_sessions"]):
+        msgs = [t for t in sess if t.get("content")]
+        rows = c.execute("select id from turns where user_id=? and session_id=? order by seq", (uid, sid)).fetchall()
+        gold |= {tid for (tid,), t in zip(rows, msgs) if t.get("has_answer")}
+    obs = []
+    for oid, content, src, meta in c.execute(
+            "select id, content, source_turn_ids, extra_metadata from memories "
+            "where memory_type='observation' and invalidated_at is null"):
+        obs.append({"id": oid, "content": content, "src": set(json.loads(src) if isinstance(src, str) else (src or [])),
+                    "metadata": json.loads(meta) if meta else {}})
+    c.close()
+    cited = set().union(*(o["src"] for o in obs)) if obs else set()
+    ans = words(item["answer"])
+    return {"observations": len(obs), "log_tokens": estimate_tokens(render_observation_log(obs)),
+            "evidence_turns": len(gold), "cited_all": int(bool(gold) and gold <= cited),
+            "cited_any": int(bool(gold & cited)),
+            "contains": int(any(ans <= words(o["content"]) for o in obs)) if 1 <= len(ans) <= 5 else None,
+            "category": item["category"]}
+
+
 async def build(conv: str, tokens: int, rpm: float, out_dir: Path) -> dict:
     """Observer-only ingest with the batched observer at ``tokens``; returns cost figures."""
     from benchmarks.qa import e2e_qa as qa
@@ -116,10 +143,34 @@ async def build(conv: str, tokens: int, rpm: float, out_dir: Path) -> dict:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--conv", default="conv-48")
-    p.add_argument("--tokens", default="4000,12000,30000", help="batch thresholds to build")
+    p.add_argument("--tokens", default="8000,12000,20000", help="batch thresholds to build")
     p.add_argument("--rpm", type=float, default=4.0)
     p.add_argument("--out", default=str(ROOT / "benchmarks" / "qa" / "runs" / "obs_batch"))
+    p.add_argument("--score-lme", action="store_true", help="score the finished LME-dev logs in runs/v6 and exit")
     a = p.parse_args()
+    if a.score_lme:
+        from benchmarks.qa.e2e_qa import _safe, lme_items
+
+        items = {_safe(it["group"]): it for it in lme_items("dev")}  # dev rows only
+        rows = []
+        for done in sorted((V6 / "ingest_cache" / "lme").glob("*.obs.done")):
+            g = done.name[: -len(".obs.done")]
+            if g in items:
+                llm = json.loads(done.read_text()).get("llm", {})
+                sessions = sum(1 for x in items[g]["_x"]["haystack_sessions"] if any(t.get("content") for t in x))
+                rows.append({"group": g, **score_lme(done.with_suffix(".db"), items[g]),
+                             "calls": llm.get("calls"), "sessions": sessions,
+                             "out_tokens": llm.get("completion_tokens"), "json_failed": llm.get("json_failed", 0)})
+        for r in rows:
+            print(r)
+        if rows:
+            n = len(rows)
+            cont = [r["contains"] for r in rows if r["contains"] is not None]
+            print(f"\n{n} logs: cited all {sum(r['cited_all'] for r in rows)}/{n}, any {sum(r['cited_any'] for r in rows)}/{n}, "
+                  f"contains {sum(cont)}/{len(cont)}; calls per session "
+                  f"{sum(r['calls'] for r in rows) / sum(r['sessions'] for r in rows):.2f}; log tokens median "
+                  f"{sorted(r['log_tokens'] for r in rows)[n // 2]:,}")
+        return
     if a.conv not in DEV:
         raise SystemExit(f"{a.conv} is held out; this experiment runs on {sorted(DEV)} only")
     from benchmarks.qa import e2e_qa as qa

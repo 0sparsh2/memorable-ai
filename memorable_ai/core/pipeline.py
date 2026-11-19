@@ -354,8 +354,11 @@ class WritePipeline:
                                                     scope_user=scope.user_id)
             prior = sorted(prior, key=lambda m: m.get("id") or 0)[-120:]
             try:
+                # the per-episode observer writes ~1.8 output tokens of JSON per message token
+                size = sum(estimate_tokens(t.get("content") or "") for t in turns)
                 obs = await observe(turns, prior_log=render_observation_log(prior, max_tokens=1500),
-                                    user_name=self._user_name(scope))
+                                    user_name=self._user_name(scope),
+                                    max_tokens=min(32_000, 1_000 + int(2.5 * size)))
             except Exception as e:  # noqa: BLE001 - the log is additive; the batch stays queued
                 logger.warning("Observer failed for %d queued episodes: %s", len(batch), e)
                 return batches.index(batch)
