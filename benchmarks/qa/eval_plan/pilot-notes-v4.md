@@ -45,3 +45,11 @@ PILOT_PROJECTION: answers+judges ~3.3k calls (A5 1.7k, A6 1.2k, D5 0.2k, drift c
 **LongMemEval-S, stopped and resumed (2026-11-20).** Stopped by hand at 02:45 EST after 73 of the 99 held-out haystacks, at 386 of 500 groups walked. The process had grown to an 18 GB footprint, because PyTorch on Apple's MPS leaks across haystacks, and swap had filled the disk (details in `pilot-notes-v6.md`). Nothing finished was lost: 73 `.done` caches, 146 context rows and 73 check rows, all parseable. The three haystacks in flight are re-extracted from scratch. It resumed on CPU (`MEMORABLE_TORCH_DEVICE=cpu`), which gives byte-identical retrieval contexts. The publish step still re-checks all 99 against the Kaggle-built A3.
 
 **Publish check failed on one haystack, then repaired (2026-11-20, 17:35 EST).** `v4_publish` found A5x equal to the stored A3 on 98 of 99. In the one exception, a single extractive episode-summary line differed (structure compared only; no held-out text was read). On that haystack, MPS reproduces the stored A3 and CPU does not: a near-tie the device flips. Its A5, A5x and A6 rows and its cache were removed (backups `*.bak-20261120`), and it was re-extracted on MPS alone (`--groups`, one process, so the MPS leak does not matter). The publish step then re-runs.
+
+**LongMemEval-S, built and published (2026-11-20, 17:57 EST).** All 99 held-out haystacks:
+- Extraction: 9,159 calls for 4,742 sessions, 1.93 per session (bar B9 ≤ 2.5).
+- Replies: 89 unparseable (1.0%) and 331 repaired (3.6%); no thinking text and no empty replies.
+- Time: 94 h of ingest summed over parallel workers.
+- Check: A5 without its facts equals the stored A3 context on all 99, after the repair above.
+- Published to the loop as `contexts_lme_v4.jsonl`: A5 99, A6 99, A3r 20.
+- They are answered after v6's answers, per the owner's order.
