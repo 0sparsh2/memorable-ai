@@ -23,7 +23,7 @@ from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
-from memorable_ai.core.embeddings import OnnxEncoder, _onnx_file
+from memorable_ai.core.embeddings import OnnxEncoder, _onnx_file, torch_device
 
 logger = logging.getLogger(__name__)
 
@@ -183,4 +183,4 @@ def load_reranker(spec: Optional[str] = None, max_length: int = 128):
             logger.debug("ONNX reranker unavailable for %s (%s); using PyTorch", spec, e)
     from sentence_transformers import CrossEncoder
 
-    return CrossEncoder(spec, max_length=max_length)
+    return CrossEncoder(spec, max_length=max_length, device=torch_device())  # MEMORABLE_TORCH_DEVICE

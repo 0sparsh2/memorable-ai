@@ -13,6 +13,37 @@ def test_space_of_groups_backends_of_one_model():
     assert space_of("hash") != space_of("hashing")
 
 
+@pytest.mark.parametrize("env, want", [(None, None), ("cpu", "cpu")])
+def test_torch_device_pins_the_embedder_and_the_reranker(monkeypatch, env, want):
+    """MEMORABLE_TORCH_DEVICE reaches both PyTorch loaders; unset leaves sentence-transformers' own choice."""
+    import sentence_transformers
+
+    from memorable_ai.core.embeddings import load_encoder
+    from memorable_ai.core.rerank import load_reranker
+
+    seen = []
+
+    class Fake:
+        def __init__(self, spec, device=None, **kw):
+            seen.append((type(self).__name__, spec, device))
+
+    class SentenceTransformer(Fake):
+        pass
+
+    class CrossEncoder(Fake):
+        pass
+
+    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", SentenceTransformer)
+    monkeypatch.setattr(sentence_transformers, "CrossEncoder", CrossEncoder)
+    if env:
+        monkeypatch.setenv("MEMORABLE_TORCH_DEVICE", env)
+    else:
+        monkeypatch.delenv("MEMORABLE_TORCH_DEVICE", raising=False)
+    load_encoder("torch:org/model")
+    load_reranker("torch:org/reranker")
+    assert seen == [("SentenceTransformer", "org/model", want), ("CrossEncoder", "org/reranker", want)]
+
+
 @pytest.mark.asyncio
 async def test_changing_turn_model_reembeds_turns_and_tags_spaces(engine_factory, monkeypatch, tmp_path):
     db = f"sqlite:///{tmp_path / 'spaces.db'}"

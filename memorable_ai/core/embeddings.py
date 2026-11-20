@@ -22,6 +22,12 @@ installed and the repo publishes ``onnx/model.onnx``. The vectors are identical 
 PyTorch's (measured cosine 1.0000) and 2-6x faster on CPU. Set
 ``MEMORABLE_EMBED_BACKEND=torch`` to opt out.
 
+``MEMORABLE_TORCH_DEVICE`` (e.g. ``cpu``) pins the PyTorch models, this embedder and
+the reranker's CrossEncoder, to one device. By default sentence-transformers picks
+CUDA, then Apple's MPS, then CPU. On MPS a process that embeds many haystacks keeps
+growing: measured 4.5 GB after one LongMemEval haystack and about 0.4 GB more per
+haystack, against a flat 0.6 GB on CPU at the same speed (2026-11-20).
+
 The ONNX path needs only ``onnxruntime`` plus the ``tokenizers`` package that
 transformers already installs. It reads the ONNX files the model repo already
 publishes. sentence-transformers' own ONNX extra (optimum-onnx) cannot be installed
@@ -310,6 +316,11 @@ def space_of(spec: Optional[str]) -> str:
     return spec
 
 
+def torch_device() -> Optional[str]:
+    """``MEMORABLE_TORCH_DEVICE`` for the PyTorch models, or None for sentence-transformers' own choice."""
+    return os.getenv("MEMORABLE_TORCH_DEVICE") or None
+
+
 def load_encoder(spec: str):
     """Build the model object for a backend spec (see module docstring)."""
     if ":" in spec and spec.split(":", 1)[0] in ("onnx", "onnx-int8", "onnx-o3"):
@@ -328,7 +339,7 @@ def load_encoder(spec: str):
             logger.debug("ONNX backend unavailable for %s (%s); using PyTorch", spec, e)
     from sentence_transformers import SentenceTransformer
 
-    model = SentenceTransformer(spec)
+    model = SentenceTransformer(spec, device=torch_device())
     if os.getenv("MEMORABLE_EMBED_MAX_LENGTH"):
         model.max_seq_length = int(os.environ["MEMORABLE_EMBED_MAX_LENGTH"])
     return model

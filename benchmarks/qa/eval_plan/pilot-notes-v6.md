@@ -50,3 +50,21 @@ Prereg v6 was frozen and committed before this pilot wrote anything. The observe
 On 2026-11-19 the owner approved the full run as preregistered, and chose the judge order: v6's answers before the paused v3/v4 loop resumes. The observer ingest started at 15:20 EST (`runs/v6/full_build.log`, pid in `full_build.pid`): an A7 pass over LoCoMo-dev and the 150 LME-dev haystacks (the pilot's six logs are reused from the cache), then a D7 pass, which needs every log. Same settings as the pilot: Ultra, thinking off, 6 requests/min offered, 2 haystacks in parallel.
 
 Prereg v6.1 (the batched observer) is not run: its rule picked no batch size (`prereg-v6.1.md`).
+
+## Stops and resume, 2026-11-20
+
+**First stop, 02:13 EST.** The build stopped on its first non-429 error, as the stop rules require: `sqlite3.OperationalError: unable to open database file` while it wrote haystack `afdc33df` (LME A7, 43rd of 150). The disk was full: macOS swap had grown to 29 GB on the same volume. Nothing written before the stop was damaged: the v5 answers and both v6 context files parse line by line.
+
+**Cause: a memory leak in the build processes, not the observer.** A resume at 02:27 grew to 9.4 GB in five minutes. The v4.2 LME build, running beside it, had reached 18 GB. Both embed with PyTorch, and sentence-transformers places PyTorch on Apple's MPS by default. Measured on LME-dev haystacks with the harness's own ingest:
+
+| Device | After 1 haystack | Each further haystack | Time per haystack |
+|---|---|---|---|
+| MPS | 4.5 GB | about +0.4 GB | 13–20 s |
+| MPS with `gc.collect()` and `torch.mps.empty_cache()` each haystack | 4.2 GB | still grows (4.8 GB after 4) | 13–19 s |
+| CPU | 0.6 GB | flat (0.59 GB after 4) | 17–19 s |
+
+Both builds were stopped by hand at 02:35 (v6) and 02:45 (v4.2). Neither lost finished work: every finished log has its `.done` marker, the output files parse, and haystacks in flight are rebuilt from scratch.
+
+**Fix: `MEMORABLE_TORCH_DEVICE=cpu`.** It pins the embedder and the reranker to CPU. Before resuming, A3g was rebuilt on CPU for both LoCoMo-dev conversations and 20 LME-dev haystacks. All 367 contexts are byte-identical to the MPS-built ones in `contexts_*.jsonl`, so the A7 contexts built on CPU keep the same turns as A3g. No prompt, model, budget or context changed.
+
+**Rate so far:** 37 new LME haystacks in 10.5 h, about 3.2 observer calls/min. That is below the pilot's 4.4/min because v5's Ultra reader draws on the same per-model limit. At that rate the remaining 108 take about 31 h, so the build totals about 43 h. That is above the pilot's band (22.5–38.6 h) and within the 72 h cap.
