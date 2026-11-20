@@ -76,12 +76,32 @@ def drift_rows(bench: str, reader: str) -> list:
     return stratified_exact(a3, DRIFT[bench], V6_SEED, key=lambda r: r["category"])
 
 
+LOG_SEP = "\n\nRetrieved excerpts:\n"  # e2e_qa.memory_context: the log, then this, then A3g's context
+
+
+def base_mismatches(cells: dict) -> list:
+    """A7 and D7 rows whose excerpts differ from A3g's context for the same question (prereg v6: A7 = A3g + log).
+
+    The device can flip an extractive-summary near-tie: CPU and MPS agree on 53 of 53 dev haystacks
+    but differed on 1 of 26 held-out LME haystacks (2026-11-20), so this is checked, not assumed.
+    """
+    a3g = {r["qid"]: r["context"] for r in cells.get("A3g", ())}
+    bad = []
+    for arm in ("A7", "D7"):
+        for r in cells.get(arm, ()):
+            head, sep, base = r["context"].rpartition(LOG_SEP)
+            if not sep or base != a3g.get(r["qid"]):
+                bad.append(f"{arm} {r['group']} {r['qid']}")
+    return bad
+
+
 def build(reader: str, pilot: bool, only=None) -> dict:
     """``only``: the arms to queue (the rest are left for a later --append)."""
     out, missing = {}, []
     rng = random.Random(V6_SEED)
     for bench in ("locomo", "lme"):
         cells = v6_rows(bench)
+        missing += [f"{bench}: excerpts differ from A3g: {m}" for m in base_mismatches(cells)]
         cells["A3r"] = drift_rows(bench, reader)
         if only:
             cells = {a: rows for a, rows in cells.items() if a in only}

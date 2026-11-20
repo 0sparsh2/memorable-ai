@@ -31,7 +31,7 @@ Memory graph foundation (G0). See `docs/memory_graph_design.md` and `docs/instru
     - `fast`: potion-32M turns. Fused 0.579, ingest 25 s, query 3.2 ms.
     - `legacy`: one model for everything (v0.2 behaviour).
   - Per-layer vector-space tags with automatic re-embedding when the model changes.
-  - `MEMORABLE_TORCH_DEVICE` (e.g. `cpu`) pins the PyTorch embedder and reranker to one device. On Apple's MPS, a process that embeds many conversations grows without bound (4.5 GB after one LongMemEval haystack, then about 0.4 GB more each; `torch.mps.empty_cache()` does not stop it). On CPU it stays at 0.6 GB at the same speed. Retrieval is unchanged: CPU and MPS give byte-identical contexts on 347 LoCoMo-dev and 20 LongMemEval-dev questions. The ONNX backend, the default, always runs on CPU.
+  - `MEMORABLE_TORCH_DEVICE` (e.g. `cpu`) pins the PyTorch embedder and reranker to one device. On Apple's MPS, a process that embeds many conversations grows without bound (4.5 GB after one LongMemEval haystack, then about 0.4 GB more each; `torch.mps.empty_cache()` does not stop it). On CPU it stays at 0.6 GB at the same speed. CPU and MPS almost always give byte-identical contexts (53 of 53 dev haystacks), but not always. On 1 of 26 held-out LongMemEval haystacks, one extractive episode-summary line differed: a near-tie in sentence choice that the device flipped. Eval builds that need identical contexts check them rather than assume it. The ONNX backend, the default, always runs on CPU.
 - `memorable-ai[fast]` extra (onnxruntime, model2vec, numba). Hypothesis property tests (dev extra), a concurrency test, and LongMemEval / model / backend benchmarks.
 - Optional numba kernel for local-push PPR.
 - Retrieval round 2 (`docs/retrieval_round2.md`):
