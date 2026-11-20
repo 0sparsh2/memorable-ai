@@ -118,3 +118,50 @@ Notes:
 
 - On 5 LongMemEval-dev haystacks (all single-session-user), the per-episode log is 25–26.5k tokens, the size Mastra reports for its LongMemEval contexts (~30k; Mastra 94.9 with gpt-5-mini). All 5 logs cite the evidence turn and hold the answer.
 - **The batched observer loses detail.** Given 8–20k tokens of messages at once, Ultra wrote about a quarter as many observations per message as it does one episode at a time (94–129 against 393), well inside its output budget. Prereg v6.1's rule (within 3 points on evidence cited, 5 on answers contained) picks no batch size, so v6.1 is not run.
+
+## 2026-11-20: v5 answer model chosen (Ultra); v4.2 LME build published (commit 12c974e)
+
+Retrieval, LoCoMo (1536 questions, 10 conversations, no LLM):
+
+| Signal | recall@5 | vs previous milestone (paired) |
+|---|---|---|
+| turn/pipeline | 0.701 | unchanged |
+| turn/recall | 0.68 | unchanged |
+| episode/fused | 0.575 | unchanged |
+| fact/graph | 0.018 | unchanged |
+| fact/pipeline | 0.059 | unchanged |
+
+Ingest 46.9 s wall / 160.0 s CPU, query p50 31.7 ms; graph: 756 entities, 113 relations (previous: 50.1 s, 34.4 ms).
+
+| QA arm | LoCoMo J-strict | LoCoMo J-lenient | LongMemEval J | answered / queued |
+|---|---|---|---|---|
+| A0 full context | 70.9 [67–75] | 92.4 [90–95] | 53.3 [37–70] | 580 / 1639 |
+| A1 BM25 only | 53.0 [49–57] | — | 70.7 [64–77] | 761 / 2040 |
+| A2 v0.3 (RRF) | 61.0 [57–65] | — | 72.8 [66–80] | 694 / 2040 |
+| A3 current (score fusion + Ettin-17M) | 66.9 [63–71] | 84.1 [81–87] | 74.7 [68–81] | 717 / 2040 |
+| A3w current, 40 turns | 69.1 [66–73] | — | 75.3 [69–81] | 758 / 2040 |
+| A4 current + fine-tuned MiniLM | 63.9 [47–81] | 80.6 [67–92] | 93.3 [80–100] | 51 / 2040 |
+| A5 current + 20 LLM facts | 75.0 [50–100] | 75.0 [50–100] | — | 8 / 599 |
+| A6 current, 80 turns | 77.8 [44–100] | — | — | 9 / 599 |
+| D5 decoy: another conversation's facts | 0.0 [0–0] | — | — | 1 / 100 |
+
+Published (self-reported, other answer models): best LoCoMo 93.6 (Agent Zero Memory), best LongMemEval 95.6 (Agent Zero Memory); Zep 81.5 / 71.2. Full table: `python -m benchmarks.qa.compare`.
+
+Notes:
+- Retrieval is unchanged, as expected: nothing in retrieval changed since the last entry. `MEMORABLE_TORCH_DEVICE` (f9f7689) only pins where PyTorch runs.
+- The QA rows above are the paused v3/v4 loop, answered by Lightning. They are unchanged since v5 took the judge quota. The v4.2 LME contexts (A5, A6: 99 held-out haystacks each) are now queued for that loop, behind v6's answers.
+
+**Answer model (prereg v5, final; dev rows: LoCoMo conv-48/49, 347 questions; LongMemEval-dev, 150; Lightning judge):**
+
+| Context | Reader | LoCoMo J-strict | LoCoMo J-lenient | LongMemEval J |
+|---|---|---|---|---|
+| A3 current memory | Lightning | 62.5 [57–68] | 83.9 [80–88] | 68.0 [60–75] |
+| A3 current memory | **Ultra (chosen)** | 71.8 [67–76] | **89.6** [86–93] | 75.2 [68–82] |
+| A3 current memory | Mistral Large 4 | 72.5 [68–77] | 86.7 [83–90] | **78.5** [72–85] |
+| A0 full context | Ultra | 86.1 [82–90] | **98.3** [97–99] | 56.2 [42–71] (n=48) |
+| A0 full context | Mistral Large 4 | 87.9 [84–91] | 95.7 [93–98] | **83.3** [73–94] (n=48) |
+| Published best (self-reported) | — | — | 93.6 (Agent Zero) | 95.6 (Agent Zero) |
+
+- Ultra over Lightning on A3: +9.2 LoCoMo J-strict (CI +5.5…+13.0) and +6.7 LME J (CI +1.3…+12.7). Mistral's lead over Ultra is inside the noise on both, so B11 picks the faster reader (`results-v5.md`).
+- Against the published best, our memory arm with Ultra is 4.0 points short on LoCoMo J-lenient and 20.4 short on LongMemEval. With the whole conversation, Ultra scores 98.3 on LoCoMo, so the reader no longer limits LoCoMo; memory does. These are dev rows with a Lightning judge, while published systems use GPT-4o-class judges on the full sets, so the comparison is indicative only.
+- Ultra handles LongMemEval's full ~115k-token history badly (56.2 against Mistral's 83.3).
