@@ -1,6 +1,6 @@
 # Preregistration v6 (DRAFT): the observation log, end to end
 
-**Status:** frozen 2026-11-19 when its pilot started; dry run passed ([dry-run-v6.json](dry-run-v6.json)). It is a new eval beside v3–v5, whose arms and answers are untouched. The one open value is the answer model `<READER>`, which v5's bar B11 picks by its own frozen rule. v6 answers no question before v5 has reported, so nothing in v6 can influence that choice; filling in `<READER>` is the only edit allowed after the freeze.
+**Status:** frozen 2026-11-19 when its pilot started; dry run passed ([dry-run-v6.json](dry-run-v6.json)). It is a new eval beside v3–v5, whose arms and answers are untouched. The one open value is the answer model `<READER>`, which v5's bar B11 picks by its own frozen rule. v6 answers no question before v5 has reported, so nothing in v6 can influence that choice; filling in `<READER>` is the only edit allowed after the freeze. **Filled 2026-11-20 at 18:50 EST:** v5 reported (`RESULTS: ok (reader = ultra)`, [results-v5.md](results-v5.md)), so `<READER>` = **ultra** (`nvidia/nemotron-3-ultra-550b-a55b`, thinking off). No v6 question had been answered.
 
 **Why.** Every LongMemEval leader compresses the whole history with an LLM instead of retrieving raw excerpts. Mastra's observational memory reports 94.87% with gpt-5-mini answering (84.23% with gpt-4o); its context averaged ~30k tokens of dated observations ([docs/observation_memory.md](../../../docs/observation_memory.md)). Memorable now has an observer (one LLM call per closed episode) and an observation log in context (commit aee0fd1). v6 measures it on the iteration slice that v5 defined.
 
@@ -8,7 +8,7 @@
 
 **lesson:** We learn whether a whole observation log, on top of the current retrieval, turns into correct answers, at what ingest cost, and whether G2's graph walk changes answers at all. You should turn the observer on by default for users with an LLM only if it clears B15 and B16, and keep the G2 walk on only if B18 shows no harm.
 
-Primary metric and CIs as in v3: LLM-judge accuracy; 95% paired bootstrap over questions; "beats" = the CI of the paired difference excludes 0. Judges and judge prompts are v3's. **The answer model is v5's chosen reader** (bar B11's rule), fixed before any v6 answer and named here when v5 reports: `<READER>`.
+Primary metric and CIs as in v3: LLM-judge accuracy; 95% paired bootstrap over questions; "beats" = the CI of the paired difference excludes 0. Judges and judge prompts are v3's. **The answer model is v5's chosen reader** (bar B11's rule), fixed before any v6 answer and named here when v5 reports: Ultra.
 
 | # | Metric | Pass bar | Direction | A miss means |
 |---|---|---|---|---|
@@ -25,11 +25,11 @@ Primary metric and CIs as in v3: LLM-judge accuracy; 95% paired bootstrap over q
 
 ## Arms
 
-All answered by `<READER>` with v3's prompt and settings, judged by v3's judge.
+All answered by Ultra with v3's prompt and settings, judged by v3's judge.
 
 | Arm | Identity | Settings |
 |---|---|---|
-| A3 | stored v3 contexts | Score fusion + Ettin-17M, top 10 turns + 3 episodes, no graph walk. Already answered by `<READER>` in v5 on these questions, so v5's answers are reused, with a drift check below |
+| A3 | stored v3 contexts | Score fusion + Ettin-17M, top 10 turns + 3 episodes, no graph walk. Already answered by Ultra in v5 on these questions, so v5's answers are reused, with a drift check below |
 | A3g | `memorable#current` | A3 with the G2 walk (`graph_turn_weight=1.0`), rebuilt from an LLM-free ingest |
 | A7 | `memorable#observation-log` | A3g's turns and episodes, byte for byte, plus the observation log of a separate observer-only ingest (`extraction.facts=false`, `observations=true`, no LLM entity adjudication), within 30k tokens, before the excerpts |
 | D7 | decoy | A3g plus the log of another conversation of the same benchmark (fixed derangement; for LoCoMo-dev the other dev conversation) |
@@ -43,7 +43,7 @@ All answered by `<READER>` with v3's prompt and settings, judged by v3's judge.
 
 A3g is the baseline for A7 (same turns, the log is the only difference) and for D7. A3 is the baseline for A3g.
 
-**Drift check:** 40 LoCoMo-dev and 20 LME-dev A3 questions are answered again by `<READER>` inside this run. If fewer than 90% of verdicts agree with v5's, A3 is re-answered on the whole slice.
+**Drift check:** 40 LoCoMo-dev and 20 LME-dev A3 questions are answered again by Ultra inside this run. If fewer than 90% of verdicts agree with v5's, A3 is re-answered on the whole slice.
 
 ## Decoys
 
@@ -57,7 +57,7 @@ A3g is the baseline for A7 (same turns, the log is the only difference) and for 
 - **Dry run (zero cost, stubbed observer):**
   - A7 without its log must equal A3g byte for byte on every question.
   - A3 rebuilt must equal the stored A3 (already checked: 191/191 on conv-48).
-- **Pilot:** conv-48 and the first 5 LME-dev haystacks (file order) through the observer, then 3 answers per cell once `<READER>` is named. Their observer ingests are cached and reused by the full run, since every setting is frozen. Stop if more than 5% of observer calls still fail after retries, any reply has thinking text, or the sanity check above fails.
+- **Pilot:** conv-48 and the first 5 LME-dev haystacks (file order) through the observer, then 3 answers per cell once the reader is named (Ultra). Their observer ingests are cached and reused by the full run, since every setting is frozen. Stop if more than 5% of observer calls still fail after retries, any reply has thinking text, or the sanity check above fails.
 - **Full run:** the first error that is not a 429, a timeout or a dropped connection stops it and is reported. More than 2% unparsed judge verdicts in a cell stops it.
 - **Caps:** 3 days for the observer ingest, 4 days for answering. $0 (NIM free tier).
 - No prompt, budget, model or context change after the pilot starts (otherwise: prereg v6.1).
