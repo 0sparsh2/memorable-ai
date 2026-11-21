@@ -81,3 +81,5 @@ The reader was filled in from v5 at 18:50 EST (`RESULTS: ok (reader = ultra)`), 
 `PILOT_PROJECTION (answers): 557 now (A3g 497 + A3r 60) and 994 after the build (A7, D7), at 1–2 answers/min with Ultra shared by the observer: 5–9 h now, 8–16 h after the build; cap 4 days; verdict=within.`
 
 The full answer run is part of the owner's approval of 2026-11-19. Stage 1 (A3g, A3r) started at 19:12 EST in `runs/v6ans`. A7 and D7 are appended once the build ends and `v6_build` finds every A7 and D7 row equal to A3g plus its log.
+
+**Stage 1 done, 2026-11-21 at 02:00 EST.** All 557 rows answered (A3g 497, A3r 60) in 6.8 h, about 1.4 answers/min with Ultra shared by the observer build. All were answered by Ultra; none fell back, and 0 verdicts were unparsed. The drift check passes: A3r agrees with v5's A3 verdicts on 98% of 40 LoCoMo and 95% of 20 LME questions (bar 90%), so v5's A3 and A0 answers stand in for this run. B18 and the other bars are scored only by `v6_report --final`, after A7 and D7. When stage 1 ended, the build had finished 104 of 150 LME A7 logs; D7 is still to come.
