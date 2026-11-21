@@ -80,4 +80,4 @@ The reader was filled in from v5 at 18:50 EST (`RESULTS: ok (reader = ultra)`), 
 
 `PILOT_PROJECTION (answers): 557 now (A3g 497 + A3r 60) and 994 after the build (A7, D7), at 1–2 answers/min with Ultra shared by the observer: 5–9 h now, 8–16 h after the build; cap 4 days; verdict=within.`
 
-The full answer run is part of the owner's approval of 2026-11-19. Stage 1 (A3g, A3r) started at 19:15 EST in `runs/v6ans`. A7 and D7 are appended once the build ends and `v6_build` finds every A7 and D7 row equal to A3g plus its log.
+The full answer run is part of the owner's approval of 2026-11-19. Stage 1 (A3g, A3r) started at 19:12 EST in `runs/v6ans`. A7 and D7 are appended once the build ends and `v6_build` finds every A7 and D7 row equal to A3g plus its log.
