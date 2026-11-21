@@ -70,3 +70,14 @@ Both builds were stopped by hand at 02:35 (v6) and 02:45 (v4.2). Neither lost fi
 **Correction, 17:40 EST: identical almost always, not always.** The v4.2 build, also resumed on CPU, failed its own identity check on 1 of 26 held-out haystacks built on CPU. One extractive episode-summary line differed. Rebuilt on MPS, that haystack reproduces the stored A3 exactly; on CPU it does not. So the device can flip a near-tie in sentence choice. CPU and MPS agree on 53 of 53 dev haystacks so far (the 20 above and 33 A7 haystacks built on CPU, each equal to A3g plus its log). `v6_build` now refuses to queue an A7 or D7 row whose excerpts differ from A3g's context for the same question. Any such row is rebuilt on MPS from the cached log before answering. When repairing D7, do not pass `--groups`: the harness then deranges logs within those groups only, and one group would get its own log.
 
 **Rate so far:** 37 new LME haystacks in 10.5 h, about 3.2 observer calls/min. That is below the pilot's 4.4/min because v5's Ultra reader draws on the same per-model limit. At that rate the remaining 108 take about 31 h, so the build totals about 43 h. That is above the pilot's band (22.5–38.6 h) and within the 72 h cap.
+
+## Answer pilot (reader Ultra), 2026-11-20
+
+The reader was filled in from v5 at 18:50 EST (`RESULTS: ok (reader = ultra)`), before any v6 question was answered. Then 3 answers per built cell, 18 in all (`runs/v6ans_pilot`): A3g, A7 and A3r on LoCoMo-dev and LME-dev. D7 is not built yet; it runs the same path as A7.
+- **Answers:** all 18 answered by Ultra, none fell back to another model, and every judge verdict parsed (0 unparsed). One stop on a 429 was retried; no other errors.
+- **Context sizes:** A7 contexts are 12.4k tokens on LoCoMo and 28–32k on LME (log budget 30k plus the excerpts). A3g contexts are 0.9–3.4k.
+- **Rate:** 18 answers in 17 min, while Ultra also carries the observer build.
+
+`PILOT_PROJECTION (answers): 557 now (A3g 497 + A3r 60) and 994 after the build (A7, D7), at 1–2 answers/min with Ultra shared by the observer: 5–9 h now, 8–16 h after the build; cap 4 days; verdict=within.`
+
+The full answer run is part of the owner's approval of 2026-11-19. Stage 1 (A3g, A3r) started at 19:15 EST in `runs/v6ans`. A7 and D7 are appended once the build ends and `v6_build` finds every A7 and D7 row equal to A3g plus its log.
