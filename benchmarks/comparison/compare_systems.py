@@ -35,14 +35,27 @@ class SystemComparison:
         """
         logger.info("Running system comparison...")
 
+        locomo = await self._run_locomo_smoke()
         results = {
             "memorable": await self._benchmark_memorable(),
+            "locomo_smoke": locomo,
             "integration_ease": self._compare_integration_ease(),
             "features": self._compare_features(),
             "performance": await self._compare_performance(),
         }
 
         return results
+
+    async def _run_locomo_smoke(self) -> Dict[str, Any]:
+        """Run minimal LOCOMO fixture benchmark (measured, not published leaderboard)."""
+        try:
+            from benchmarks.locomo.benchmark import LOCOMOBenchmark
+
+            bench = LOCOMOBenchmark(self.memorable)
+            return await bench.run()
+        except Exception as e:
+            logger.warning(f"LOCOMO smoke failed: {e}")
+            return {"error": str(e)}
 
     async def _benchmark_memorable(self) -> Dict[str, Any]:
         """Benchmark Memorable performance."""
@@ -107,6 +120,9 @@ class SystemComparison:
                 "interceptor": True,
                 "graph_support": True,
                 "research_backed": True,
+                "llm_extraction": True,
+                "multi_signal_retrieval": True,
+                "temporal_validity": True,
                 "memory_modes": 3,
                 "sql_database": True,
                 "multi_hop": True,
@@ -151,11 +167,13 @@ class SystemComparison:
         memorable_perf = await self._benchmark_memorable()
 
         # Other systems (from research/claims)
+        locomo = await self._run_locomo_smoke()
         return {
             "memorable": {
                 "retrieval_latency_ms": memorable_perf["retrieval_latency_ms"],
                 "setup_time_ms": memorable_perf["setup_time_ms"],
-                "token_savings": "50%+ (target)",
+                "locomo_smoke_overall": locomo.get("overall_score"),
+                "token_savings": "measured per-query TBD; target 50%+ vs full-context",
             },
             "mem0": {
                 "retrieval_latency_ms": "~100ms (from paper)",

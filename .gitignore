@@ -45,8 +45,18 @@ htmlcov/
 .env
 .env.local
 
+# LOCOMO dataset (downloaded)
+benchmarks/locomo/data/locomo10.json
+
+# ResearchDoc generated figures (regenerate via figures/generate_figures.py)
+ResearchDoc/figures/output/*.png
+ResearchDoc/figures/output/*.pdf
+
 # Database files
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
 *.sqlite
 *.sqlite3
 
@@ -63,8 +73,8 @@ benchmarks/results/
 docs/_build/
 
 # Test files (keep only test_describe_simple.py as example)
-test_*.py
-!test_describe_simple.py
+/test_*.py
+!/test_describe_simple.py
 
 # Internal/Development documentation (not needed for public repo)
 cursor_analyze_memori_and_supermemory_r.md
@@ -85,3 +95,14 @@ build/
 dist/
 *.egg
 
+
+# LongMemEval dataset (downloaded)
+benchmarks/longmemeval/data/
+# End-to-end QA runs (contexts hold dataset text; reports are committed separately)
+benchmarks/qa/runs/
+
+# Hypothesis example database
+.hypothesis/
+
+# Generated training data (public-corpus text; reproducible from training/)
+training/data/

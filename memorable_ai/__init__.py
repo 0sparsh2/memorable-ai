@@ -15,6 +15,8 @@ References:
 __version__ = "0.1.1"
 
 from memorable_ai.core.memory_engine import MemoryEngine
+from memorable_ai.core.scope import Scope
+from memorable_ai.utils.config import MemorableConfig
 
-__all__ = ["MemoryEngine"]
+__all__ = ["MemoryEngine", "MemorableConfig", "Scope"]
 

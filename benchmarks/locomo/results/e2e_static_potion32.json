@@ -1,0 +1,77 @@
+{
+  "k": 5,
+  "embedder": "static:minishlab/potion-base-32M",
+  "turn_context": 0.5,
+  "conversations": 10,
+  "turns": 5882,
+  "episodes": 471,
+  "facts": 226,
+  "questions": 1536,
+  "ingest_seconds": 15.4,
+  "query_ms_p50": 1.8,
+  "recall": {
+    "turn/dense": {
+      "overall": 0.487,
+      "multi-hop": 0.443,
+      "open-domain": 0.239,
+      "single-hop": 0.54,
+      "temporal": 0.458
+    },
+    "turn/lexical": {
+      "overall": 0.569,
+      "multi-hop": 0.436,
+      "open-domain": 0.348,
+      "single-hop": 0.606,
+      "temporal": 0.651
+    },
+    "turn/fused": {
+      "overall": 0.579,
+      "multi-hop": 0.475,
+      "open-domain": 0.315,
+      "single-hop": 0.628,
+      "temporal": 0.617
+    },
+    "turn/rrf d1.0:l0.8": {
+      "overall": 0.568,
+      "multi-hop": 0.486,
+      "open-domain": 0.272,
+      "single-hop": 0.625,
+      "temporal": 0.576
+    },
+    "turn/rrf d1.0:l1.0": {
+      "overall": 0.572,
+      "multi-hop": 0.493,
+      "open-domain": 0.272,
+      "single-hop": 0.624,
+      "temporal": 0.589
+    },
+    "turn/rrf d0.7:l1.0": {
+      "overall": 0.579,
+      "multi-hop": 0.504,
+      "open-domain": 0.293,
+      "single-hop": 0.625,
+      "temporal": 0.607
+    },
+    "turn/rrf d0.5:l1.0": {
+      "overall": 0.579,
+      "multi-hop": 0.475,
+      "open-domain": 0.315,
+      "single-hop": 0.628,
+      "temporal": 0.617
+    },
+    "turn/rrf d0.3:l1.0": {
+      "overall": 0.591,
+      "multi-hop": 0.479,
+      "open-domain": 0.337,
+      "single-hop": 0.636,
+      "temporal": 0.645
+    },
+    "episode/fused": {
+      "overall": 0.505,
+      "multi-hop": 0.638,
+      "open-domain": 0.391,
+      "single-hop": 0.497,
+      "temporal": 0.442
+    }
+  }
+}

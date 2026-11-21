@@ -2,6 +2,10 @@
 
 ## Executive Summary
 
+> **Competitive research (May 2026):** See [agent_memory_landscape_2026/report.md](../agent_memory_landscape_2026/report.md) for validated gap analysis vs Mem0, Supermemory, Zep, Letta, LangMem, and benchmark artifacts.
+
+> **Research paper (living draft):** [ResearchDoc/research_paper.md](../ResearchDoc/research_paper.md) — figures via `python ResearchDoc/figures/generate_figures.py`
+
 Memorable is the first memory system to unify three distinct architectural approaches into a single, production-ready solution:
 
 1. **Interceptor-based integration** (from Memori) - Zero-code integration

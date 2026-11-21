@@ -1,0 +1,171 @@
+{
+  "experiment_id": "hybrid_ingest",
+  "hypothesis": "Raw episodic + extracted semantic memories (dual store).",
+  "config": {
+    "ingest_mode": "hybrid",
+    "context_format": "dated",
+    "no_llm": false,
+    "conversations": 1,
+    "questions": 10,
+    "qa_timeout": 300.0
+  },
+  "timestamp": "2026-05-18T16:03:15.359559+00:00",
+  "results": {
+    "mode": "full",
+    "ingest_mode": "hybrid",
+    "context_format": "dated",
+    "conversations": 1,
+    "questions_evaluated": 10,
+    "by_category": {
+      "temporal": {
+        "count": 6,
+        "f1_mean": 0.16666666666666666,
+        "judge_accuracy": 0.0,
+        "evidence_recall_mean": 0.16666666666666666
+      },
+      "open_domain": {
+        "count": 1,
+        "f1_mean": 0.25,
+        "judge_accuracy": 0.0,
+        "evidence_recall_mean": 1.0
+      },
+      "multi_hop": {
+        "count": 3,
+        "f1_mean": 0.0,
+        "judge_accuracy": 0.0,
+        "evidence_recall_mean": 0.3333333333333333
+      },
+      "overall": {
+        "count": 10,
+        "f1_mean": 0.125,
+        "judge_accuracy": 0.0
+      }
+    },
+    "overall_f1": 0.125,
+    "overall_judge_accuracy": 0.0,
+    "rows": [
+      {
+        "category": 2,
+        "category_name": "temporal",
+        "question": "When did Caroline go to the LGBTQ support group?",
+        "gold": "7 May 2023",
+        "prediction": "7 May, 2023",
+        "f1": 1.0,
+        "judge_correct": false,
+        "evidence_recall": 1.0
+      },
+      {
+        "category": 2,
+        "category_name": "temporal",
+        "question": "When did Melanie paint a sunrise?",
+        "gold": "2022",
+        "prediction": "last year",
+        "f1": 0.0,
+        "judge_correct": false,
+        "evidence_recall": 0.0
+      },
+      {
+        "category": 3,
+        "category_name": "open_domain",
+        "question": "What fields would Caroline be likely to pursue in her educaton?",
+        "gold": "Psychology, counseling certification",
+        "prediction": "counseling or mental health work",
+        "f1": 0.25,
+        "judge_correct": false,
+        "evidence_recall": 1.0
+      },
+      {
+        "category": 1,
+        "category_name": "multi_hop",
+        "question": "What did Caroline research?",
+        "gold": "Adoption agencies",
+        "prediction": "not mentioned",
+        "f1": 0.0,
+        "judge_correct": false,
+        "evidence_recall": 0.0
+      },
+      {
+        "category": 1,
+        "category_name": "multi_hop",
+        "question": "What is Caroline's identity?",
+        "gold": "Transgender woman",
+        "prediction": "not mentioned",
+        "f1": 0.0,
+        "judge_correct": false,
+        "evidence_recall": 1.0
+      },
+      {
+        "category": 2,
+        "category_name": "temporal",
+        "question": "When did Melanie run a charity race?",
+        "gold": "The sunday before 25 May 2023",
+        "prediction": "not mentioned",
+        "f1": 0.0,
+        "judge_correct": false,
+        "evidence_recall": 0.0
+      },
+      {
+        "category": 2,
+        "category_name": "temporal",
+        "question": "When is Melanie planning on going camping?",
+        "gold": "June 2023",
+        "prediction": "not mentioned",
+        "f1": 0.0,
+        "judge_correct": false,
+        "evidence_recall": 0.0
+      },
+      {
+        "category": 1,
+        "category_name": "multi_hop",
+        "question": "What is Caroline's relationship status?",
+        "gold": "Single",
+        "prediction": "not mentioned",
+        "f1": 0.0,
+        "judge_correct": false,
+        "evidence_recall": 0.0
+      },
+      {
+        "category": 2,
+        "category_name": "temporal",
+        "question": "When did Caroline give a speech at a school?",
+        "gold": "The week before 9 June 2023",
+        "prediction": "not mentioned",
+        "f1": 0.0,
+        "judge_correct": false,
+        "evidence_recall": 0.0
+      },
+      {
+        "category": 2,
+        "category_name": "temporal",
+        "question": "When did Caroline meet up with her friends, family, and mentors?",
+        "gold": "The week before 9 June 2023",
+        "prediction": "not mentioned",
+        "f1": 0.0,
+        "judge_correct": false,
+        "evidence_recall": 0.0
+      }
+    ]
+  },
+  "comparison": {
+    "memorable": {
+      "single_hop": null,
+      "multi_hop": 0.0,
+      "temporal": 0.16666666666666666,
+      "open_domain": 0.25
+    },
+    "mem0_baseline": {
+      "single_hop": 0.85,
+      "multi_hop": 0.72,
+      "temporal": 0.68,
+      "open_domain": 0.65,
+      "overall": 0.725
+    },
+    "improvement": {
+      "single_hop": -0.85,
+      "multi_hop": -0.72,
+      "temporal": -0.5133333333333334,
+      "open_domain": -0.4,
+      "overall": -0.725
+    }
+  }
+}

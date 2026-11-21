@@ -198,32 +198,36 @@ memory.enable()
 # Now supports relationship traversal and multi-hop queries!
 ```
 
-### Manual Memory Management
+### Users, sessions and explicit APIs
 
 ```python
 import asyncio
+from openai import OpenAI
 from memorable_ai import MemoryEngine
 
 memory = MemoryEngine(database="sqlite:///memory.db")
-memory.enable()
+memory.enable()                                   # patches OpenAI / Anthropic / LiteLLM (sync, async, streaming)
+client = OpenAI()
 
-async def manage_memories():
-    # Add memory manually
-    await memory.add_memory(
-        content="User prefers Python over JavaScript",
-        memory_type="preference"
-    )
-    
-    # Search memories
-    results = await memory.search_memories("Python", limit=10)
-    for mem in results:
-        print(f"{mem['type']}: {mem['content']}")
-    
-    # Get statistics
-    stats = memory.get_stats()
-    print(f"Total memories: {stats['total_memories']}")
+# Attribute calls to a user + session. Memories never cross users.
+with memory.scope(user_id="alice", session_id="chat-42"):
+    client.chat.completions.create(model="gpt-4o-mini", messages=[...])
+# ...or pass it per call: metadata={"user_id": "alice", "session_id": "chat-42"}
 
-asyncio.run(manage_memories())
+async def main():
+    # Explicit write path (for frameworks you wire yourself); waits for completion
+    await memory.ingest(messages, response, user_id="alice", session_id="chat-42")
+    await memory.end_session(user_id="alice", session_id="chat-42")   # summarise open episodes
+
+    ctx = await memory.get_context("Any allergies I should mention?", user_id="alice")
+    hits = await memory.recall("trip to Kyoto", user_id="alice")      # facts + episodes + excerpts
+    mid = await memory.add_memory("User works at Stripe", user_id="alice", infer=True)
+    print(memory.history(mid))                    # version chain (updates never overwrite)
+    print(memory.graph(user_id="alice"))          # knowledge-graph edges
+    await memory.forget_user("alice")             # right to be forgotten
+
+asyncio.run(main())
+memory.flush()   # wait for background writes (default write_mode="background")
 ```
 
 ## Architecture
@@ -256,12 +260,18 @@ Memorable uses an interceptor-based architecture that transparently:
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Memory Hierarchy
+### Memory layers (v0.2)
 
-- **Working Memory**: Immediate context (current conversation)
-- **Short-term Memory**: Recent conversations (6 hours)
-- **Long-term Memory**: Consolidated facts, preferences, skills
-- **Episodic Memory**: Temporal sequences and events (with graph)
+| Layer | What | Used for |
+|---|---|---|
+| L0 turns | Verbatim messages per session (only the unseen suffix of resent histories) | Ground truth, provenance, excerpt retrieval |
+| L1 episodes | Topic/time-coherent segments: event-segmentation boundaries; title, summary, key points | Past-conversation recall, multi-hop questions |
+| L2 facts | Atomic statements with bi-temporal versions (`supersedes_id` / `superseded_by_id`) | Precise recall, core user profile |
+| L2 graph | Entities, relations, mentions in SQL; single-valued edges invalidate old ones | Personalized PageRank retrieval ("where does my sister live?") |
+| L4 context | Core profile + relevant facts + episodes + excerpts, dated, token-budgeted | What gets injected |
+
+Retrieval fuses dense, BM25 and graph signals with Reciprocal Rank Fusion, scoped per user.
+See [docs/memory_architecture.md](docs/memory_architecture.md) for the design, the research it draws on, and LoCoMo retrieval measurements.
 
 ## Configuration
 
@@ -335,14 +345,16 @@ memory = MemoryEngine(mode="hybrid")
 
 ## Benchmarks
 
-Memorable is designed to outperform existing systems:
+**Implemented today:** LOCOMO smoke harness (`benchmarks/locomo/test_data.py`), measured retrieval latency via `benchmarks/comparison/compare_systems.py`, and unit tests (`pytest tests/unit`).
 
-- **30%+ improvement** over Mem0 on LOCOMO benchmark (target)
-- **95%+ accuracy** on multi-hop reasoning (target)
-- **<100ms** retrieval latency (target)
-- **50%+ token savings** vs full-context (target)
+**Targets** (not yet validated on the full snap-research/LOCOMO leaderboard):
 
-*Benchmark results will be published in upcoming releases. See [docs/benchmarks.md](docs/benchmarks.md) for methodology.*
+- 30%+ improvement over Mem0 on LOCOMO
+- 95%+ accuracy on multi-hop reasoning
+- Under 100ms retrieval latency (p95)
+- 50%+ token savings vs full-context
+
+See [docs/benchmarks.md](docs/benchmarks.md) for measured vs target metrics and [agent_memory_landscape_2026/report.md](agent_memory_landscape_2026/report.md) for competitive gap analysis.
 
 ## Research & Citations
 
@@ -415,14 +427,17 @@ make test-cov
 
 ## Roadmap
 
-- [ ] Complete framework integrations (LangChain, AutoGen, CrewAI)
-- [ ] Publish benchmark results
-- [ ] Research paper publication
+- [x] Mem0-style extraction/update pipeline (pattern / LLM / hybrid)
+- [x] Multi-signal retrieval (semantic + BM25 + entity + graph)
+- [x] Temporal validity (valid_from, invalidated_at, superseded_by)
+- [x] LangChain callback, AutoGen bridge, CrewAI helpers, optional Mem0 adapter
+- [x] Neo4j graph backend (optional `[graph]` extra)
+- [x] Competitive research (`agent_memory_landscape_2026/`)
+- [ ] Full LOCOMO / LongMemEval / BEAM leaderboard runs
+- [ ] Publish benchmark results vs Mem0
+- [ ] Bundled connectors (Notion, Slack) and full multimodal ingest
 - [ ] Enterprise features (admin dashboard, audit logs)
-- [ ] Multi-modal support (images, video, audio)
-- [ ] Advanced graph features (Neo4j integration)
-- [ ] Performance optimizations
-- [ ] Additional LLM provider integrations
+- [ ] Research paper publication
 
 See [ROADMAP.md](ROADMAP.md) for detailed plans.
 
