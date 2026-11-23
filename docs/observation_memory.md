@@ -1,6 +1,6 @@
 # Observation log: design note (2026-11-19)
 
-**Status:** built (commit aee0fd1, opt-in) and under test as arm A7 of [prereg v6](../benchmarks/qa/eval_plan/prereg-v6.md), frozen 2026-11-19. The batched observer below is built too; it lost detail on its first measurement.
+**Status:** built (commit aee0fd1, opt-in) and measured as arm A7 of [prereg v6](../benchmarks/qa/eval_plan/prereg-v6.md) on 2026-11-23: a 30,000-token log added to A3g's turns gains +11.5 LoCoMo-dev J-strict and +6.7 LME-dev J, and a decoy log gains nothing ([results-v6.md](../benchmarks/qa/eval_plan/results-v6.md)). The product's default log budget (4,000 tokens) has not been measured. The batched observer below is built too; it lost detail on its first measurement.
 
 ## Why
 
@@ -46,3 +46,19 @@ NIM's free tier limits requests per model (about 4–6 a minute sustained), not 
 - **Baselines:** A3 and A0 on the same answer model. **Decoy:** another haystack's log, as D5 did for facts.
 - **Observer model:** Ultra if v5 shows it sustains the rate, otherwise Bolt. One call per session: LongMemEval dev is 150 haystacks × ~50 sessions ≈ 7.5k calls; LoCoMo dev is 2 conversations × ~30 sessions ≈ 60 calls.
 - **The bar** follows v4's B7 style: the gain over A3 on one benchmark with CI > 0, and no drop on the other.
+
+## Result (prereg v6, 2026-11-23)
+
+Answered by Ultra and judged by Lightning, on dev rows (LoCoMo conv-48/49, 347 questions; LongMemEval dev, 150).
+
+| Context | LoCoMo J-strict | LoCoMo J-lenient | LongMemEval J | Reader prompt tokens, median (LoCoMo / LME) |
+|---|---|---|---|---|
+| A3g: retrieved turns | 71.2 [67–76] | 91.1 [88–94] | 75.3 [68–82] | 1.0k / 3.0k |
+| **A7: A3g + observation log** | **82.7** [78–87] | **96.0** [94–98] | **82.0** [76–88] | 12.3k / 26.3k |
+| D7: A3g + another conversation's log | 71.2 [66–76] | — | 72.0 [65–79] | 10.9k / 26.3k |
+| A0: whole conversation | 86.2 [82–90] | 98.3 [97–99] | 56.2 [42–71] (n=48) | 22.3k / 108.5k |
+
+- The log is the largest gain measured so far (B15), and the decoy shows that its content does the work (B16).
+- Observer cost: 1.18 calls per session, 0 of 8,536 replies unparseable. That is 8,536 calls and 25.7M tokens for 152 logs, so about 38 h awake on NIM's free tier for the 150 LongMemEval-dev haystacks.
+- On LongMemEval, 15 of A7's 27 misses are preference questions. They are the next target.
+
