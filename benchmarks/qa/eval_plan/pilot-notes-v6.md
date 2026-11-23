@@ -83,3 +83,13 @@ The reader was filled in from v5 at 18:50 EST (`RESULTS: ok (reader = ultra)`), 
 The full answer run is part of the owner's approval of 2026-11-19. Stage 1 (A3g, A3r) started at 19:12 EST in `runs/v6ans`. A7 and D7 are appended once the build ends and `v6_build` finds every A7 and D7 row equal to A3g plus its log.
 
 **Stage 1 done, 2026-11-21 at 02:00 EST.** All 557 rows answered (A3g 497, A3r 60) in 6.8 h, about 1.4 answers/min with Ultra shared by the observer build. All were answered by Ultra; none fell back, and 0 verdicts were unparsed. The drift check passes: A3r agrees with v5's A3 verdicts on 98% of 40 LoCoMo and 95% of 20 LME questions (bar 90%), so v5's A3 and A0 answers stand in for this run. B18 and the other bars are scored only by `v6_report --final`, after A7 and D7. When stage 1 ended, the build had finished 104 of 150 LME A7 logs; D7 is still to come.
+
+## Build done, 2026-11-23
+
+**The observer ingest finished at 14:23 EST on 2026-11-23.** All A7 and D7 contexts are built (LoCoMo-dev 347 each, LME-dev 150 each). The A7 pass over LME made 6,067 observer calls across 108 haystacks; the other 42 logs, plus the pilot's, came from the cache. The D7 passes made no LLM calls.
+
+**Cap: 95 h of wall clock against a 72 h cap. The Mac was asleep for 57 of those hours.** Across the ingest window (11-19 15:20 to 11-23 14:23), the power log shows 57.2 h asleep and 37.9 h awake. Most of the sleep came from closing the lid ("Clamshell Sleep", ten times from 11-21 03:20), which caffeinate cannot prevent. A sleeping Mac makes no observer calls, so the 37.9 h awake is the cost the cap was meant to bound. That is inside the pilot's band (22.5–38.6 h) and the cap. The build did not stop on an error. No prompt, model, budget or context changed. This is recorded as a deviation and was not a reason to stop.
+
+**One D7 row repaired.** `v6_build` found 1 of 994 A7/D7 rows whose excerpts differed from A3g: D7 for LME `726462e0`, built on CPU. It was rebuilt on MPS as a one-haystack shard of the same command (`--split dev --arms D7 --shard 4/150`, no `--groups`, so the decoy is still the next dev haystack in sorted order, `72e3ee87`). The rebuilt row's excerpts equal A3g's, its log equals the stored one and `72e3ee87`'s own A7 log, and every other field is unchanged. It replaced the stored row (backup `runs/v6/contexts_lme.jsonl.bak-20261123`; the rebuilt row is kept in `runs/v6/repair_d7_726462e0_mps.jsonl`). So the device flipped 1 of 150 LME dev haystacks on CPU, in line with 1 of 26 held-out ones.
+
+**Stage 2 started at 14:26 EST:** `v6_build --arms A7,D7 --append` queued 994 rows, with none missing or mismatched. The answer loop uses stage 1's settings (`runs/v6ans/answer_loop.cmd.txt`), with caffeinate tied to it.
