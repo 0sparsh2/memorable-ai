@@ -156,12 +156,59 @@ Notes:
 | Context | Reader | LoCoMo J-strict | LoCoMo J-lenient | LongMemEval J |
 |---|---|---|---|---|
 | A3 current memory | Lightning | 62.5 [57–68] | 83.9 [80–88] | 68.0 [60–75] |
-| A3 current memory | **Ultra (chosen)** | 71.8 [67–76] | **89.6** [86–93] | 75.2 [68–82] |
-| A3 current memory | Mistral Large 4 | 72.5 [68–77] | 86.7 [83–90] | **78.5** [72–85] |
-| A0 full context | Ultra | 86.1 [82–90] | **98.3** [97–99] | 56.2 [42–71] (n=48) |
+| A3 current memory | **Ultra (chosen)** | 71.8 [67–76] | **89.6** [86–93] | 74.7 [67–81] |
+| A3 current memory | Mistral Large 4 | 72.3 [67–77] | 86.5 [83–90] | **78.0** [71–85] |
+| A0 full context | Ultra | 86.2 [82–90] | **98.3** [97–99] | 56.2 [42–71] (n=48) |
 | A0 full context | Mistral Large 4 | 87.9 [84–91] | 95.7 [93–98] | **83.3** [73–94] (n=48) |
 | Published best (self-reported) | — | — | 93.6 (Agent Zero) | 95.6 (Agent Zero) |
 
 - Ultra over Lightning on A3: +9.2 LoCoMo J-strict (CI +5.5…+13.0) and +6.7 LME J (CI +1.3…+12.7). Mistral's lead over Ultra is inside the noise on both, so B11 picks the faster reader (`results-v5.md`).
-- Against the published best, our memory arm with Ultra is 4.0 points short on LoCoMo J-lenient and 20.4 short on LongMemEval. With the whole conversation, Ultra scores 98.3 on LoCoMo, so the reader no longer limits LoCoMo; memory does. These are dev rows with a Lightning judge, while published systems use GPT-4o-class judges on the full sets, so the comparison is indicative only.
+- Against the published best, our memory arm with Ultra is 4.0 points short on LoCoMo J-lenient and 20.9 short on LongMemEval. With the whole conversation, Ultra scores 98.3 on LoCoMo, so the reader no longer limits LoCoMo; memory does. These are dev rows with a Lightning judge, while published systems use GPT-4o-class judges on the full sets, so the comparison is indicative only.
 - Ultra handles LongMemEval's full ~115k-token history badly (56.2 against Mistral's 83.3).
+- Corrected 2026-11-23: four cells in this table (Ultra A3 LME, Mistral A3 on all three, Ultra A0 J-strict) were 0.1–0.5 off the stored v5 answers. They now match `results-v5.md`'s cell table; no verdict changes.
+
+## 2026-11-23: v6 observation log passes (A7 +11.5 LoCoMo, +6.7 LME) (commit 962b801)
+
+Retrieval, LoCoMo (1536 questions, 10 conversations, no LLM):
+
+| Signal | recall@5 | vs previous milestone (paired) |
+|---|---|---|
+| turn/pipeline | 0.701 | unchanged |
+| turn/recall | 0.68 | unchanged |
+| episode/fused | 0.575 | unchanged |
+| fact/graph | 0.018 | unchanged |
+| fact/pipeline | 0.059 | unchanged |
+
+Ingest 44.4 s wall / 154.0 s CPU, query p50 31.0 ms; graph: 756 entities, 113 relations (previous: 46.9 s, 31.7 ms).
+
+| QA arm | LoCoMo J-strict | LoCoMo J-lenient | LongMemEval J | answered / queued |
+|---|---|---|---|---|
+| A0 full context | 70.9 [67–75] | 92.4 [90–95] | 53.3 [37–70] | 580 / 1639 |
+| A1 BM25 only | 53.0 [49–57] | — | 70.7 [64–77] | 761 / 2040 |
+| A2 v0.3 (RRF) | 61.0 [57–65] | — | 72.8 [66–80] | 694 / 2040 |
+| A3 current (score fusion + Ettin-17M) | 66.9 [63–71] | 84.1 [81–87] | 74.7 [68–81] | 717 / 2040 |
+| A3w current, 40 turns | 69.1 [66–73] | — | 75.3 [69–81] | 758 / 2040 |
+| A4 current + fine-tuned MiniLM | 63.9 [47–81] | 80.6 [67–92] | 93.3 [80–100] | 51 / 2040 |
+| A5 current + 20 LLM facts | 75.0 [50–100] | 75.0 [50–100] | — | 8 / 599 |
+| A6 current, 80 turns | 77.8 [44–100] | — | — | 9 / 599 |
+| D5 decoy: another conversation's facts | 0.0 [0–0] | — | — | 1 / 100 |
+
+Published (self-reported, other answer models): best LoCoMo 93.6 (Agent Zero Memory), best LongMemEval 95.6 (Agent Zero Memory); Zep 81.5 / 71.2. Full table: `python -m benchmarks.qa.compare`.
+
+Notes:
+- Retrieval is unchanged, as expected: nothing in retrieval changed since the last entry. The v6 results commit is d46de84; the milestone started at 962b801, just before it.
+- The QA rows above are the paused v3/v4 loop (answered by Lightning), unchanged since the last entry. That loop resumed at 18:20 EST today, after v6's answers.
+
+**Observation log (prereg v6, final; reader Ultra, Lightning judge; dev rows: LoCoMo conv-48/49, 347 questions; LongMemEval-dev, 150):**
+
+| Context | LoCoMo J-strict | LoCoMo J-lenient | LongMemEval J | Reader prompt, median |
+|---|---|---|---|---|
+| A3 current memory (v5) | 71.8 [67–76] | 89.6 [86–93] | 74.7 [67–81] | — |
+| A3g + graph walk | 71.2 [67–76] | 91.1 [88–94] | 75.3 [68–82] | 1.0k / 3.0k |
+| **A7 A3g + observation log (≤30k)** | **82.7** [78–87] | **96.0** [94–98] | **82.0** [76–88] | 12.3k / 26.3k |
+| D7 decoy: another conversation's log | 71.2 [66–76] | — | 72.0 [65–79] | 10.9k / 26.3k |
+| A0 full context (v5) | 86.2 [82–90] | 98.3 [97–99] | 56.2 [42–71] (n=48) | 22.3k / 108.5k |
+| Published best (self-reported) | — | 93.6 (Agent Zero) | 95.6 (Agent Zero) | |
+
+- A7 − A3g: +11.5 LoCoMo J-strict (CI +6.9…+16.1) and +6.7 LME J (CI +0.7…+12.7). B15 passes on both benchmarks. The decoy log gains nothing (B16), and the observer costs 1.18 calls per session (B17). The graph walk alone makes no measurable change (B18). See `results-v6.md`.
+- Against the published best: LoCoMo J-lenient is **+2.4 above** (96.0 against 93.6), but only on the two dev conversations, with a Lightning judge, while published systems use GPT-4o-class judges on the full sets. It is a lead, not a claim, until the eight held-out conversations are run with the frozen configuration. LongMemEval is 13.6 short, and preference questions are 15 of A7's 27 misses.
