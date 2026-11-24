@@ -1,6 +1,6 @@
-# Preregistration v7 (DRAFT): the answer prompt
+# Preregistration v7: the answer prompt
 
-**Status:** draft, 2026-11-24. It is frozen when its pilot starts. It is a new eval beside v3–v6, whose arms and answers are untouched.
+**Status:** frozen 2026-11-24 at 12:45 EST, when its pilot started; dry run passed ([dry-run-v7.json](dry-run-v7.json)). It is a new eval beside v3–v6, whose arms and answers are untouched.
 
 **Why.** v6's A7 (A3g plus the observation log) misses 15 of 25 LME-dev single-session-preference questions. 10 of those 15 responses refuse ("I don't have any specific advice about chocolate chip cookies in my memories"), even when the context names what the preference rubric asks for. None of the 10 hits refuse ([pilot-notes-v6.md](pilot-notes-v6.md), "After the results"; read after v6 was final). A refusal pattern (`v7_report.REFUSAL`) also covers 4 of A7's 12 other LME misses and 10 of its 60 LoCoMo J-strict misses (1 of its 287 hits). The cause is our `ANSWER_PROMPT`: "Answer in a short phrase or sentence. If the memories do not contain the answer, say that you don't know." That suits factual recall, but asked for advice, the reader concludes that the advice is not in memory. LongMemEval's own reader prompt has neither rule. Its default (`src/generation/run_generation.py`, retrieval without CoT) reads "I will give you several history chats between you and a user. Please answer the question based on the relevant chat history." v7 changes only the reader's prompt. Contexts, reader and judges stay as in v6.
 
