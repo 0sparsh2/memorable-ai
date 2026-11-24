@@ -1,0 +1,14 @@
+{
+ "CHECK: price-table": "ok ($0; NIM free tier: Ultra reader, Lightning judge)",
+ "CHECK: input-shapes": "ok (queue 1,429 rows: A7p1/A7p2 347+347 LoCoMo-dev, 150+150 LME-dev; A7r 40+20; D8p0/p1/p2 125 each)",
+ "CHECK: context-identity": "ok (every A7p1/A7p2/A7r row's context, question, date line and answer == v6's A7 row, 1,054/1,054; D8 keeps its question and date line, 375/375)",
+ "CHECK: p0-unchanged": "ok (ANSWER_PROMPTS['p0'] == ANSWER_PROMPT; renders identically on 497/497 A7 rows)",
+ "CHECK: prompts-render": "ok (no unfilled placeholder on 1,429/1,429 rows; prompts differ only in the instruction paragraph)",
+ "CHECK: blinding": "ok (no eval/test/judge/benchmark/score/rubric word in p0, p1 or p2)",
+ "CHECK: decoy-derangement": "ok (D8: 0 of 125 paired with its own haystack; 25 per non-preference category)",
+ "CHECK: length-budget": "ok (largest prompt ~33.8k tokens, median ~12.0k; within Ultra's context)",
+ "CHECK: pipeline": "ok (stub reader and judge answered 1,429/1,429; v7_report scored B19, B20, B21 and the drift check)",
+ "CHECK: split-disjointness": "ok (dev rows only: LoCoMo conv-48/49, LME dev 150; LME-dev has no abstention questions)",
+ "CHECK: tests": "ok (tests/benchmarks/test_answer_prompts.py, 8 passed; full suite 230 passed. Coverage is 78.3% against the 80% gate, and was already 78.3% without this change)",
+ "DRY_RUN_RESULT": "pass"
+}

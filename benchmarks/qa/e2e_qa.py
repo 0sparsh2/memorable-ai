@@ -42,7 +42,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("MEMORABLE_LLM__DEFAULT_MODEL", "none")  # LLM-free ingestion (prereg)
 
-from benchmarks.qa.prompts import ANSWER_PROMPT, MEM0_JUDGE_SYSTEM, lme_judge_prompt, mem0_judge_prompt  # noqa: E402
+from benchmarks.qa.prompts import ANSWER_PROMPT, ANSWER_PROMPTS, MEM0_JUDGE_SYSTEM, lme_judge_prompt, mem0_judge_prompt  # noqa: E402,F401
 
 LOCOMO = ROOT / "benchmarks" / "locomo" / "data" / "locomo10.json"
 LME = ROOT / "benchmarks" / "longmemeval" / "data" / "longmemeval_s_cleaned.json"
@@ -106,6 +106,8 @@ ARMS["A3g"] = dict(ARMS["A3"], graph_turn_weight=1.0)
 ARMS["A7"] = dict(ARMS["A3g"], log_tokens=LOG_TOKENS)
 ARMS["D7"] = dict(ARMS["A7"], log_from="other")
 LENIENT_ARMS.update({"A3g", "A7"})
+# prereg v7 (answer prompt): A7's contexts answered with prompt variants; D8 is LME-only (no lenient)
+LENIENT_ARMS.update({"A7p1", "A7p2", "A7r"})
 _GROUP_ORDER: Dict[str, List[str]] = {}  # bench -> group ids, for D5's fixed derangement
 
 # prereg v5 (answer model): a context record may name a reader; the judge stays MODEL. Arms are
@@ -824,9 +826,14 @@ async def judge(rec: Dict[str, Any], response: str, ledger: Ledger, stub: bool, 
     return out
 
 
+def answer_prompt(rec: Dict[str, Any]) -> str:
+    """The reader's prompt for a queued row: ANSWER_PROMPT unless the row names a v7 variant."""
+    return ANSWER_PROMPTS[rec.get("prompt", "p0")].format(memories=rec["context"], date_line=rec.get("date_line", ""),
+                                                          question=rec["question"])
+
+
 async def answer_one(rec: Dict[str, Any], ledger: Ledger, stub: bool, sem) -> Dict[str, Any]:
-    prompt = ANSWER_PROMPT.format(memories=rec["context"], date_line=rec.get("date_line", ""),
-                                  question=rec["question"])
+    prompt = answer_prompt(rec)
     reader = READERS[rec["reader"]] if rec.get("reader") else None  # prereg v5; None = MODEL
     async with sem:
         t = time.perf_counter()

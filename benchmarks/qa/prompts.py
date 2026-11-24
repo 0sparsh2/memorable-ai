@@ -21,6 +21,22 @@ ANSWER_PROMPT = """You are a helpful assistant with long-term memory of past con
 Question: {question}
 Answer:"""
 
+# prereg v7: answer-prompt variants. Only the instruction paragraph differs; p0 is ANSWER_PROMPT
+# exactly, and a queued row picks its prompt with a "prompt" field (absent = p0).
+_ANSWER_HEAD, _ANSWER_TAIL = ANSWER_PROMPT.split("{date_line}")[0] + "{date_line}", "\n\nQuestion: {question}\nAnswer:"
+_DATES = 'Work out relative dates ("yesterday", "last week") from the date of the memory they appear in.'
+ANSWER_INSTRUCTIONS = {
+    "p0": f"Answer the question using these memories. {_DATES} Answer in a short phrase or sentence. "
+          "If the memories do not contain the answer, say that you don't know.",
+    "p1": f"Answer the question using these memories. {_DATES} If the question asks about facts or events, "
+          "answer in a short phrase or sentence, and if the memories do not contain the answer, say that you "
+          "don't know. If it asks for advice, suggestions or an opinion, give a helpful answer that draws on "
+          "what the memories say about the user: their preferences, past experiences, plans and circumstances.",
+    "p2": f"Answer the question based on the relevant memories. {_DATES}",  # as LongMemEval's own reader
+}
+ANSWER_PROMPTS = {k: _ANSWER_HEAD + v + _ANSWER_TAIL for k, v in ANSWER_INSTRUCTIONS.items()}
+assert ANSWER_PROMPTS["p0"] == ANSWER_PROMPT
+
 LME_JUDGE = {
     "generic": "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. \n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only.",
     "temporal-reasoning": "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. In addition, do not penalize off-by-one errors for the number of days. If the question asks for the number of days/weeks/months, etc., and the model makes off-by-one errors (e.g., predicting 19 days when the answer is 18), the model's response is still correct. \n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only.",
