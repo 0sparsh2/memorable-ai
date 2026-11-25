@@ -51,6 +51,22 @@ def test_gain_verdict_follows_b15s_form():
     assert gain_verdict({"locomo": flat, "lme": {"diff": 0.03, "lo": -0.01, "hi": 0.07}}) == "miss"
 
 
+def test_p1s_adds_longmemevals_step_by_step_instruction_to_p1s_rules():
+    p1s = ANSWER_INSTRUCTIONS["p1s"]
+    assert "step by step: first extract all the relevant information" in p1s
+    assert "you don't know" in p1s and "preferences, past experiences, plans and circumstances" in p1s
+
+
+def test_v8_readers_and_arm_labels():
+    from benchmarks.qa.e2e_qa import READERS
+    from benchmarks.qa.v8_report import arms_in, label
+
+    assert {"kimi", "minimax", "step", "mistral", "ultra"} <= set(READERS)
+    cells = {("lme", "A7p1", "ultra"): {}, ("lme", "A7p1s", "ultra"): {}, ("lme", "A7p1", "kimi"): {}}
+    assert arms_in(cells) == [("A7p1s", "D8p1s", "ultra"), ("A7p1", "D8p1", "kimi")]
+    assert label("A7p1s", "ultra") == "U·P1s" and label("A7p1", "kimi") == "kimi·P1"
+
+
 def test_refusal_pattern():
     assert refuses("I don't have any specific advice about cookies in my memories.")
     assert not refuses("Try adding sea salt; it pairs well with the turbinado sugar you used.")

@@ -108,6 +108,7 @@ ARMS["D7"] = dict(ARMS["A7"], log_from="other")
 LENIENT_ARMS.update({"A3g", "A7"})
 # prereg v7 (answer prompt): A7's contexts answered with prompt variants; D8 is LME-only (no lenient)
 LENIENT_ARMS.update({"A7p1", "A7p2", "A7r"})
+LENIENT_ARMS.update({"A7p1s", "A7p1r"})  # prereg v8 (answer model; A7p1@<reader> is already lenient)
 _GROUP_ORDER: Dict[str, List[str]] = {}  # bench -> group ids, for D5's fixed derangement
 
 # prereg v5 (answer model): a context record may name a reader; the judge stays MODEL. Arms are
@@ -116,6 +117,10 @@ READERS: Dict[str, str] = {
     "lightning": "nvidia_nim/nvidia/nemotron-3.5-lightning-30b-a3b",
     "ultra": "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b",
     "mistral": "nvidia_nim/mistralai/mistral-large-4-1t-a52b",
+    # prereg v8 candidates (NIM listing, 2026-11-24)
+    "kimi": "nvidia_nim/moonshotai/kimi-k3.1-pro",
+    "minimax": "nvidia_nim/minimaxai/minimax-m3.1-flash",
+    "step": "nvidia_nim/stepfun-ai/step-5-preview",
 }
 V5_SEED = 20261119
 LOCOMO_DEV = ("conv-48", "conv-49")  # prereg v5: LoCoMo's dev conversations, drawn with V5_SEED

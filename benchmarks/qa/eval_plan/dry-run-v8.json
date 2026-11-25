@@ -1,0 +1,13 @@
+{
+ "CHECK: price-table": "ok ($0; NIM free tier: Ultra, Kimi K3.1 Pro, Mistral Large 4, MiniMax M3.1 Flash or Step 5 as readers; Lightning judge)",
+ "CHECK: input-shapes": "ok (queue 2,548 rows with X = minimax as a placeholder: 4 arms x (347 LoCoMo + 150 LME A7, 125 D8) + drift 40 + 20)",
+ "CHECK: context-identity": "ok (every row's context, question, date line, answer and abstention flag == v7's A7·P1 or D8·P1 row; v8_build refuses otherwise)",
+ "CHECK: prompts-render": "ok (no unfilled placeholder on 2,548/2,548 rows; P1s differs from P1 only in the instruction paragraph)",
+ "CHECK: blinding": "ok (no eval/test/judge/benchmark/score/rubric word in P1s)",
+ "CHECK: readers": "ok (kimi, minimax, step added to READERS; all four candidates are in NIM's model listing of 2026-11-24)",
+ "CHECK: length-budget": "ok (largest prompt ~33.8k tokens)",
+ "CHECK: pipeline": "ok (stub reader and judge answered 2,548/2,548; v8_report scored B22, B23, B24 and the drift check)",
+ "CHECK: split-disjointness": "ok (dev rows only)",
+ "CHECK: tests": "ok (233 passed; coverage gate unchanged at 78.3%, already below 80% before v7)",
+ "DRY_RUN_RESULT": "pass"
+}

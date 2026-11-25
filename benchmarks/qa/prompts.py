@@ -33,6 +33,13 @@ ANSWER_INSTRUCTIONS = {
           "don't know. If it asks for advice, suggestions or an opinion, give a helpful answer that draws on "
           "what the memories say about the user: their preferences, past experiences, plans and circumstances.",
     "p2": f"Answer the question based on the relevant memories. {_DATES}",  # as LongMemEval's own reader
+    # prereg v8: P1 with LongMemEval's step-by-step reader instruction (run_generation.py, CoT option)
+    "p1s": f"Answer the question using these memories. {_DATES} Answer step by step: first extract all the "
+           "relevant information from the memories, and then reason over it to get the answer. End with your "
+           "answer: if the question asks about facts or events, a short phrase or sentence, or that you don't "
+           "know if the memories do not contain it; if it asks for advice, suggestions or an opinion, a helpful "
+           "answer that draws on what the memories say about the user: their preferences, past experiences, "
+           "plans and circumstances.",
 }
 ANSWER_PROMPTS = {k: _ANSWER_HEAD + v + _ANSWER_TAIL for k, v in ANSWER_INSTRUCTIONS.items()}
 assert ANSWER_PROMPTS["p0"] == ANSWER_PROMPT
