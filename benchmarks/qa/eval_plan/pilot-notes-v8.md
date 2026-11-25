@@ -20,3 +20,13 @@ The prereg was frozen at 23:52 EST, when the pilot started (`runs/v8ans_pilot`).
 `PILOT_PROJECTION: per_item=1 answer + 1.6 judge calls total_items=2,548 projected=11-20 h band95=9-30 h cap=3 days verdict=within`
 
 The judge sets the pace: about 3,980 Lightning calls at v7's rate of about 6 per minute is about 11 h. The four readers run in parallel under their own per-model limits. The high end allows for stalls like the pilot's: Mistral and Kimi are slower and less reliable on the free tier, and each read-timeout stop costs the requests in flight.
+
+**Pilot complete, 2026-11-25 at 09:14 EST:** the 42nd answer (Mistral, LoCoMo) landed after its retries. The pilot has 42 of 42 answers, none empty, no fallbacks, 0 unparsed verdicts. The trimmed v3/v4 loop also finished its 195 rows, so nothing else is drawing on Lightning.
+
+## Execution on Kaggle (owner, 2026-11-25)
+
+The owner approved the full run and asked for it to run on Kaggle rather than the laptop, which sleeps when its lid closes and was on battery. Nothing in the prereg changes:
+- The same harness commit (4383479), queue (`runs/v8ans`, 2,548 rows, uploaded as the private dataset `memorable-v8-queue`), flags (`answer-loop --concurrency 16 --rpm 6 --reader-rpm 6 --probe-every 60`, 600 s timeout) and NIM key apply. NIM's limits are per key, so where the client runs does not change them.
+- Job: `training/kaggle/v8_answers/v8_answers.py`, CPU only, which stops itself after 11 h of a 12 h session. Every finished answer is on disk, and a second session resumes from the first's output.
+- Afterwards the answers, ledger and errors are copied into `runs/v8ans` and scored there with `v8_report --final`.
+
