@@ -212,3 +212,49 @@ Notes:
 
 - A7 − A3g: +11.5 LoCoMo J-strict (CI +6.9…+16.1) and +6.7 LME J (CI +0.7…+12.7). B15 passes on both benchmarks. The decoy log gains nothing (B16), and the observer costs 1.18 calls per session (B17). The graph walk alone makes no measurable change (B18). See `results-v6.md`.
 - Against the published best: LoCoMo J-lenient is **+2.4 above** (96.0 against 93.6), but only on the two dev conversations, with a Lightning judge, while published systems use GPT-4o-class judges on the full sets. It is a lead, not a claim, until the eight held-out conversations are run with the frozen configuration. LongMemEval is 13.6 short, and preference questions are 15 of A7's 27 misses.
+
+## 2026-11-24: v7 answer prompt P1 (LME-dev 88.7, LoCoMo-dev 97.7 lenient) (commit a7d0256)
+
+Retrieval, LoCoMo (1536 questions, 10 conversations, no LLM):
+
+| Signal | recall@5 | vs previous milestone (paired) |
+|---|---|---|
+| turn/pipeline | 0.701 | unchanged |
+| turn/recall | 0.68 | unchanged |
+| episode/fused | 0.575 | unchanged |
+| fact/graph | 0.018 | unchanged |
+| fact/pipeline | 0.059 | unchanged |
+
+Ingest 43.0 s wall / 151.4 s CPU, query p50 30.8 ms; graph: 756 entities, 113 relations (previous: 44.4 s, 31.0 ms).
+
+| QA arm | LoCoMo J-strict | LoCoMo J-lenient | LongMemEval J | answered / queued |
+|---|---|---|---|---|
+| A0 full context | 71.1 [67–75] | 92.4 [90–94] | 54.8 [39–71] | 612 / 1639 |
+| A1 BM25 only | 52.7 [49–57] | — | 70.9 [65–77] | 816 / 2040 |
+| A2 v0.3 (RRF) | 62.0 [58–66] | — | 73.0 [66–79] | 749 / 2040 |
+| A3 current (score fusion + Ettin-17M) | 67.0 [63–71] | 84.0 [81–87] | 75.1 [69–81] | 769 / 2040 |
+| A3w current, 40 turns | 68.9 [65–73] | — | 74.3 [68–80] | 798 / 2040 |
+| A4 current + fine-tuned MiniLM | 62.5 [52–73] | 85.2 [77–92] | 78.1 [62–91] | 120 / 2040 |
+| A5 current + 20 LLM facts | 68.6 [51–83] | 82.9 [69–94] | 100.0 [100–100] | 40 / 599 |
+| A6 current, 80 turns | 90.9 [77–100] | — | 50.0 [0–100] | 26 / 599 |
+| D5 decoy: another conversation's facts | 50.0 [0–100] | — | — | 2 / 100 |
+| A3r A3 answered again (drift check) | 100.0 [100–100] | — | 100.0 [100–100] | 3 / 60 |
+
+Published (self-reported, other answer models): best LoCoMo 93.6 (Agent Zero Memory), best LongMemEval 95.6 (Agent Zero Memory); Zep 81.5 / 71.2. Full table: `python -m benchmarks.qa.compare`.
+
+Notes:
+- Retrieval is unchanged, as expected: v7 changed only the reader's prompt.
+- The QA rows above are the v3/v4 loop (answered by Lightning). It was paused for v7 at 3,932 answers and resumed at 19:23 EST today.
+
+**Answer prompt (prereg v7, final; A7 contexts, reader Ultra with thinking on, Lightning judge; dev rows: LoCoMo conv-48/49, 347 questions; LongMemEval-dev, 150):**
+
+| Prompt | LoCoMo J-strict | LoCoMo J-lenient | LongMemEval J | Declines D8 (guard) |
+|---|---|---|---|---|
+| P0, previous ("short phrase … say you don't know") | 82.7 [78–87] | 96.0 [94–98] | 82.0 [76–88] | 97.6 [94–100] |
+| **P1, targeted (chosen)** | **88.2** [85–91] | **97.7** [96–99] | **88.7** [83–93] | 96.8 [94–99] |
+| P2, rules removed (LongMemEval's reader style) | 89.0 [86–92] | 98.9 [97–100] | 86.7 [81–92] | 95.2 [91–98] |
+| Published best (self-reported) | — | 93.6 (Agent Zero) | 95.6 (Agent Zero) | |
+
+- P1 − P0: +5.5 LoCoMo J-strict (CI +2.6…+8.9) and +6.7 LME J (CI +1.3…+12.7). LME preference questions go from 40 to 80. B21 picks P1 over P2 (P2 − P1 on LME is −2.0, CI −6.7…+2.7). See `results-v7.md`.
+- Against the published best: LoCoMo J-lenient is +4.1 above on dev; LongMemEval is 6.9 short (17 misses of 150: preference 5, temporal 4, multi-session 3, knowledge-update 3, assistant 2). These are dev rows with a Lightning judge, so the comparison is indicative only.
+- Correction: earlier entries and preregs called the reader "thinking off". Readers have always answered with thinking on (Ultra: a median of 465 output tokens for an 83-token answer); only the observer runs with thinking off.

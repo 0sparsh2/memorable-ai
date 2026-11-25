@@ -8,7 +8,7 @@
 
 **lesson:** We learn whether the answer prompt's brevity and "don't know" rules cost points on requests for advice, and whether a prompt that answers those from the user's remembered preferences gains without inventing answers when memory has none. You should use the prompt B21 picks for every later run, including the final held-out runs.
 
-The metric and CIs are as in v3–v6: LLM-judge accuracy, with a 95% paired bootstrap over questions. Judges and judge prompts are v3's. The reader is Ultra (v5's B11 choice), thinking off.
+The metric and CIs are as in v3–v6: LLM-judge accuracy, with a 95% paired bootstrap over questions. Judges and judge prompts are v3's. The reader is Ultra (v5's B11 choice), answering with thinking on, as in v1.1–v6 (corrected 2026-11-24: this line said "thinking off"; answers have always sent `enable_thinking=true`, and only the observer runs with thinking off).
 
 | # | Metric | Pass bar | Direction | A miss means |
 |---|---|---|---|---|
