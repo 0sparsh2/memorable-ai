@@ -1,6 +1,6 @@
-# Preregistration v8 (DRAFT): the answer model and step-by-step answering
+# Preregistration v8: the answer model and step-by-step answering
 
-**Status:** draft, 2026-11-24. It is frozen when its pilot starts. It is a new eval beside v3–v7, whose arms and answers are untouched. The owner chose the arms on 2026-11-24: Ultra with step-by-step answering, Kimi K3.1 Pro, Mistral Large 4, and one of MiniMax M3.1 Flash or Step 5 if a probe shows it responds.
+**Status:** frozen 2026-11-24 at 23:55 EST, when its pilot started; dry run passed ([dry-run-v8.json](dry-run-v8.json)). **Probe ([probe-v8.json](probe-v8.json)):** MiniMax answered in 71 s and Step 5 in 4.8 s, so **X = Step 5**. Kimi and Mistral timed out at 600 s on the first probe and answered on the retry (52 s and 100 s), so all four arms run. It is a new eval beside v3–v7, whose arms and answers are untouched. The owner chose the arms on 2026-11-24: Ultra with step-by-step answering, Kimi K3.1 Pro, Mistral Large 4, and one of MiniMax M3.1 Flash or Step 5 if a probe shows it responds.
 
 **Why.** With v7's prompt (P1), A7 scores 88.7 on LME-dev against the published 95.6. Its 17 misses are preference 5, temporal-reasoning 4, multi-session 3, knowledge-update 3 and single-session-assistant 2 ([results-v7.md](results-v7.md)). Apart from preference, these need date arithmetic, counting or the latest value. Ultra already reasons before answering, but briefly: a median of 465 output tokens for an 83-token answer. Two published results point at the reader:
 - Mastra's observational memory, with an observation log like A7's, reports 84.23% with GPT-4o answering and 94.87% with gpt-5-mini ([docs/observation_memory.md](../../../docs/observation_memory.md)).
@@ -41,7 +41,7 @@ All arms answer v6's A7 contexts byte for byte (as queued by v7), with v7's sett
 
 **P1s instruction:** "Answer the question using these memories. Work out relative dates ("yesterday", "last week") from the date of the memory they appear in. Answer step by step: first extract all the relevant information from the memories, and then reason over it to get the answer. End with your answer: if the question asks about facts or events, a short phrase or sentence, or that you don't know if the memories do not contain it; if it asks for advice, suggestions or an opinion, a helpful answer that draws on what the memories say about the user: their preferences, past experiences, plans and circumstances." The step-by-step sentence follows LongMemEval's `run_generation.py` ("Answer the question step by step: first extract all the relevant information, and then reason over the information to get the answer."). The rest is P1's rules, moved to the end. The memory header, date line and "Question: … Answer:" are as in P1.
 
-**The probe for X (before the pilot, availability and latency only).** MiniMax M3.1 Flash and Step 5 each receive the same A7·P1 prompt: the first LME-dev question in sorted qid order, with a 600 s timeout. X is whichever returns a non-empty answer sooner. If neither answers, the arm is dropped. Kimi K3.1 Pro and Mistral get the same probe; an arm whose reader does not answer is dropped and reported. Probe responses are not judged, printed or read for content.
+**The probe for X (before the pilot, availability and latency only).** MiniMax M3.1 Flash and Step 5 each receive the same A7·P1 prompt: the first LME-dev question in sorted qid order, with a 600 s timeout. X is whichever returns a non-empty answer sooner. If neither answers, the arm is dropped. Kimi K3.1 Pro and Mistral get the same probe. A reader that does not answer is probed once more; if it fails again, its arm is dropped and reported. (Draft amendment, 2026-11-24, after the first probe: Kimi and Mistral timed out at 600 s, while MiniMax answered in 71 s and Step 5 in 4.8 s. The probe measures availability only, so a retry cannot favour any arm's accuracy.) Probe responses are not judged, printed or read for content.
 
 ## Baseline arm
 
@@ -78,4 +78,4 @@ As in v3. P1s carries no evaluation words. The judge sees the question, the gold
 ## Projection (to be confirmed by the pilot)
 
 - **Answers:** 4 arms × 622 (497 A7 + 125 D8) plus 60 for the drift check: about 2,550, spread over four reader models with separate per-model limits.
-- **Judge calls:** about 4,000 on Lightning, which sets the pace: about 8–12 h at v7's judge rate. The v3/v4 loop is trimmed to 195 LME rows (owner, 2026-11-24) and finishes before the pilot.
+- **Judge calls:** about 4,000 on Lightning, which sets the pace: about 8–12 h at v7's judge rate. The v3/v4 loop is trimmed to 195 LME rows (owner, 2026-11-24). It shares Lightning with the pilot, but finishes before the full run.

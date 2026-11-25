@@ -1,0 +1,68 @@
+{
+ "attempts": [
+  {
+   "ts": "2026-11-24 23:48 EST",
+   "results": [
+    {
+     "reader": "kimi",
+     "model": "moonshotai/kimi-k3.1-pro",
+     "status": "error: ReadTimeout: ",
+     "seconds": 600.3,
+     "in_tokens": null,
+     "out_tokens": null,
+     "served_model": null
+    },
+    {
+     "reader": "mistral",
+     "model": "mistralai/mistral-large-4-1t-a52b",
+     "status": "error: ReadTimeout: ",
+     "seconds": 600.2,
+     "in_tokens": null,
+     "out_tokens": null,
+     "served_model": null
+    },
+    {
+     "reader": "minimax",
+     "model": "minimaxai/minimax-m3.1-flash",
+     "status": "ok",
+     "seconds": 70.9,
+     "in_tokens": 23605,
+     "out_tokens": 113,
+     "served_model": "minimaxai/minimax-m3.1-flash"
+    },
+    {
+     "reader": "step",
+     "model": "stepfun-ai/step-5-preview",
+     "status": "ok",
+     "seconds": 4.8,
+     "in_tokens": 23914,
+     "out_tokens": 144,
+     "served_model": "stepfun-ai/step-5-preview"
+    }
+   ]
+  },
+  {
+   "ts": "2026-11-24 23:51 EST",
+   "results": [
+    {
+     "reader": "kimi",
+     "model": "moonshotai/kimi-k3.1-pro",
+     "status": "ok",
+     "seconds": 52.4,
+     "in_tokens": 23893,
+     "out_tokens": 151,
+     "served_model": "moonshotai/kimi-k3.1-pro"
+    },
+    {
+     "reader": "mistral",
+     "model": "mistralai/mistral-large-4-1t-a52b",
+     "status": "ok",
+     "seconds": 100.0,
+     "in_tokens": 24330,
+     "out_tokens": 202,
+     "served_model": "mistralai/mistral-large-4-1t-a52b"
+    }
+   ]
+  }
+ ]
+}

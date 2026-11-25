@@ -108,17 +108,18 @@ async def _probe_one(name: str, prompt: str) -> dict:
             "out_tokens": usage.get("out"), "served_model": usage.get("served_model")}
 
 
-async def probe() -> list:
+async def probe(readers=PROBE_READERS) -> list:
     """Every candidate gets the same A7·P1 prompt: the first LME-dev question in sorted qid order."""
     row = sorted(v7_rows("lme", "A7p1"), key=lambda r: r["qid"])[0]
     prompt = answer_prompt({**row, "prompt": "p1"})
-    return list(await asyncio.gather(*(_probe_one(n, prompt) for n in PROBE_READERS)))
+    return list(await asyncio.gather(*(_probe_one(n, prompt) for n in readers)))
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("probe")
+    pr = sub.add_parser("probe")
+    pr.add_argument("--readers", default=",".join(PROBE_READERS), help="re-probe some readers (one retry)")
     b = sub.add_parser("build")
     b.add_argument("--readers", required=True, help="the non-Ultra arms, e.g. kimi,mistral,minimax")
     b.add_argument("--run", required=True)
@@ -127,9 +128,12 @@ def main() -> None:
     args = ap.parse_args()
     if args.cmd == "probe":
         os.environ.setdefault("E2E_QA_HTTP_TIMEOUT", "600")
-        res = asyncio.run(probe())
+        res = asyncio.run(probe([r for r in args.readers.split(",") if r]))
         out = ROOT / "benchmarks" / "qa" / "eval_plan" / "probe-v8.json"
-        json.dump({"ts": time.strftime("%Y-%m-%d %H:%M %Z"), "results": res}, open(out, "w"), indent=1)
+        log = json.load(open(out)) if out.exists() else {}
+        attempts = log.get("attempts") or ([{"ts": log["ts"], "results": log["results"]}] if log else [])
+        attempts.append({"ts": time.strftime("%Y-%m-%d %H:%M %Z"), "results": res})
+        json.dump({"attempts": attempts}, open(out, "w"), indent=1)
         print(json.dumps(res, indent=1))
         return
     readers = [r for r in args.readers.split(",") if r]
