@@ -882,6 +882,8 @@ async def cmd_answer(args) -> None:
                 continue
             if args.split and r.get("split") not in (args.split, "all"):
                 continue
+            if getattr(args, "bench", "") and r.get("bench") != args.bench:
+                continue
             recs.append(r)
     if args.per_arm:  # pilot: n items per (bench, arm)
         seen, keep = defaultdict(int), []
@@ -1135,6 +1137,7 @@ def main() -> None:
         if name in ("answer", "answer-loop"):
             p.add_argument("--arms", default="")
             p.add_argument("--split", default="")
+            p.add_argument("--bench", default="", choices=("", "locomo", "lme"), help="answer one benchmark only")
             p.add_argument("--per-arm", type=int, default=0, help="pilot: N items per (bench, arm)")
             p.add_argument("--reader-rpm", type=float, default=6.0,
                            help="prereg v5: request ceiling per reader model (the judge uses --rpm)")
