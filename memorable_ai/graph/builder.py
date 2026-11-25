@@ -29,8 +29,12 @@ class GraphBuilder:
             connection_string: Optional graph database connection (Neo4j, etc.)
         """
         self.connection_string = connection_string
-        # Use NetworkX for in-memory graph (can be backed by Neo4j)
         self.graph = nx.MultiDiGraph()
+        self._neo4j = None
+        if connection_string and "neo4j" in connection_string.lower():
+            from memorable_ai.graph.neo4j_backend import Neo4jGraphBackend
+
+            self._neo4j = Neo4jGraphBackend(connection_string)
         logger.info("Graph builder initialized")
 
     async def update_graph(self, memories: List[Dict[str, Any]]):
@@ -61,8 +65,10 @@ class GraphBuilder:
         if not content:
             return
 
-        # Extract entities (simplified - can be enhanced with NER)
         entities = self._extract_entities(content)
+        if self._neo4j and self._neo4j.available:
+            for entity in entities:
+                self._neo4j.upsert_entity(entity, memory_id=memory_id)
         
         # Create nodes for entities
         for entity in entities:
@@ -89,6 +95,8 @@ class GraphBuilder:
         for rel in relationships:
             source, target, rel_type = rel
             self.graph.add_edge(source, target, relationship=rel_type)
+            if self._neo4j and self._neo4j.available:
+                self._neo4j.upsert_relationship(source, rel_type, target)
 
     def _extract_entities(self, text: str) -> List[str]:
         """
@@ -102,14 +110,11 @@ class GraphBuilder:
         Returns:
             List of entity names
         """
-        entities = []
-        
-        # Simple pattern matching for common entities
-        # In production, would use spaCy, NER models, or LLM
-        
-        # Capitalized words (potential proper nouns)
+        from memorable_ai.core.entities import extract_entities
+
+        entities = [e.title() for e in extract_entities(text)]
         import re
-        capitalized = re.findall(r'\b[A-Z][a-z]+\b', text)
+        capitalized = re.findall(r"\b[A-Z][a-z]+\b", text)
         entities.extend(capitalized)
         
         # Common patterns
@@ -177,6 +182,18 @@ class GraphBuilder:
         # Extract entities from query
         query_entities = self._extract_entities(query)
         
+        if self._neo4j and self._neo4j.available:
+            neo_results = self._neo4j.find_related_entities(query, limit=limit)
+            if neo_results:
+                return [
+                    {
+                        "content": f"{r.get('source')} {r.get('rel')} {r.get('target')}",
+                        "type": "fact",
+                        "metadata": {"source": "neo4j"},
+                    }
+                    for r in neo_results
+                ]
+
         if not query_entities:
             return []
 

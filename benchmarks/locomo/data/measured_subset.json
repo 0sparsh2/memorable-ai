@@ -1,0 +1,58 @@
+{
+  "results": {
+    "mode": "full",
+    "conversations": 1,
+    "questions_evaluated": 10,
+    "by_category": {
+      "temporal": {
+        "count": 6,
+        "f1_mean": 0.04761904761904762,
+        "judge_accuracy": 0.0,
+        "evidence_recall_mean": 0.8333333333333334
+      },
+      "open_domain": {
+        "count": 1,
+        "f1_mean": 0.0,
+        "judge_accuracy": 0.0,
+        "evidence_recall_mean": 0.0
+      },
+      "multi_hop": {
+        "count": 3,
+        "f1_mean": 0.3333333333333333,
+        "judge_accuracy": 0.3333333333333333,
+        "evidence_recall_mean": 0.3333333333333333
+      },
+      "overall": {
+        "count": 10,
+        "f1_mean": 0.1285714285714286,
+        "judge_accuracy": 0.1
+      }
+    },
+    "overall_f1": 0.1285714285714286,
+    "overall_judge_accuracy": 0.1,
+    "rows": null
+  },
+  "comparison": {
+    "memorable": {
+      "single_hop": null,
+      "multi_hop": 0.3333333333333333,
+      "temporal": 0.04761904761904762,
+      "open_domain": 0.0,
+      "overall": 0.1
+    },
+    "mem0_baseline": {
+      "single_hop": 0.85,
+      "multi_hop": 0.72,
+      "temporal": 0.68,
+      "open_domain": 0.65,
+      "overall": 0.725
+    },
+    "improvement": {
+      "single_hop": -0.85,
+      "multi_hop": -0.38666666666666666,
+      "temporal": -0.6323809523809524,
+      "open_domain": -0.65,
+      "overall": -0.625
+    }
+  }
+}

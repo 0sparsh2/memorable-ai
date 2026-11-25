@@ -1,0 +1,77 @@
+{
+  "k": 5,
+  "embedder": "onnx:sentence-transformers/all-MiniLM-L6-v2",
+  "turn_context": 0.5,
+  "conversations": 10,
+  "turns": 5882,
+  "episodes": 452,
+  "facts": 227,
+  "questions": 1536,
+  "ingest_seconds": 39.0,
+  "query_ms_p50": 3.0,
+  "recall": {
+    "turn/dense": {
+      "overall": 0.433,
+      "multi-hop": 0.372,
+      "open-domain": 0.217,
+      "single-hop": 0.482,
+      "temporal": 0.421
+    },
+    "turn/lexical": {
+      "overall": 0.569,
+      "multi-hop": 0.436,
+      "open-domain": 0.348,
+      "single-hop": 0.606,
+      "temporal": 0.651
+    },
+    "turn/fused": {
+      "overall": 0.565,
+      "multi-hop": 0.504,
+      "open-domain": 0.326,
+      "single-hop": 0.596,
+      "temporal": 0.607
+    },
+    "turn/rrf d1.0:l0.8": {
+      "overall": 0.548,
+      "multi-hop": 0.475,
+      "open-domain": 0.315,
+      "single-hop": 0.586,
+      "temporal": 0.576
+    },
+    "turn/rrf d1.0:l1.0": {
+      "overall": 0.554,
+      "multi-hop": 0.475,
+      "open-domain": 0.337,
+      "single-hop": 0.592,
+      "temporal": 0.586
+    },
+    "turn/rrf d0.7:l1.0": {
+      "overall": 0.567,
+      "multi-hop": 0.493,
+      "open-domain": 0.337,
+      "single-hop": 0.602,
+      "temporal": 0.607
+    },
+    "turn/rrf d0.5:l1.0": {
+      "overall": 0.565,
+      "multi-hop": 0.504,
+      "open-domain": 0.326,
+      "single-hop": 0.596,
+      "temporal": 0.607
+    },
+    "turn/rrf d0.3:l1.0": {
+      "overall": 0.585,
+      "multi-hop": 0.5,
+      "open-domain": 0.337,
+      "single-hop": 0.62,
+      "temporal": 0.642
+    },
+    "episode/fused": {
+      "overall": 0.535,
+      "multi-hop": 0.642,
+      "open-domain": 0.424,
+      "single-hop": 0.542,
+      "temporal": 0.455
+    }
+  }
+}

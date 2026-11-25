@@ -1,0 +1,165 @@
+field_categories:
+  - category: identity
+    fields:
+      - name: product_name
+        description: Official product or project name
+        detail_level: brief
+        required: true
+      - name: vendor
+        description: Company, foundation, or authors behind the product
+        detail_level: brief
+        required: true
+      - name: license_model
+        description: Open source, commercial, or hybrid licensing
+        detail_level: moderate
+        required: true
+      - name: primary_use_cases
+        description: Typical agent memory workloads and deployment scenarios
+        detail_level: moderate
+        required: true
+      - name: deployment_options
+        description: Self-hosted, cloud SaaS, hybrid, Docker, etc.
+        detail_level: moderate
+        required: true
+      - name: pricing_summary
+        description: Free tier, usage-based, or enterprise pricing if applicable
+        detail_level: moderate
+        required: false
+  - category: architecture
+    fields:
+      - name: integration_model
+        description: How apps integrate — interceptor, SDK API, agent tools, framework callbacks
+        detail_level: detailed
+        required: true
+      - name: storage_backends
+        description: SQL, vector DB, graph DB, file stores supported
+        detail_level: detailed
+        required: true
+      - name: memory_tiers
+        description: Working, short-term, long-term, core/archival/recall, episodic/semantic/procedural
+        detail_level: detailed
+        required: true
+      - name: graph_model
+        description: Graph optional/required, entity-relationship representation, temporal edges
+        detail_level: detailed
+        required: false
+      - name: multi_tenant_model
+        description: user_id, namespace, session, org isolation patterns
+        detail_level: moderate
+        required: false
+  - category: pipeline
+    fields:
+      - name: extraction_approach
+        description: Pattern, LLM, hybrid; inputs (summary, recent window)
+        detail_level: detailed
+        required: true
+      - name: update_operations
+        description: ADD, UPDATE, DELETE, NOOP or append-only semantics
+        detail_level: detailed
+        required: true
+      - name: consolidation_strategy
+        description: Background jobs, importance scoring, contradiction resolution
+        detail_level: detailed
+        required: true
+      - name: temporal_model
+        description: Timestamps, validity intervals, invalidation, bi-temporal facts
+        detail_level: detailed
+        required: true
+      - name: agent_fact_handling
+        description: Whether assistant/agent-stated facts are stored with equal weight
+        detail_level: moderate
+        required: false
+  - category: retrieval
+    fields:
+      - name: retrieval_signals
+        description: Semantic, BM25/keyword, entity, graph — which signals and fusion
+        detail_level: detailed
+        required: true
+      - name: reranking
+        description: Rerankers, cross-encoders, LLM rerank if any
+        detail_level: moderate
+        required: false
+      - name: latency_profile
+        description: Published or claimed P50/P99 retrieval latency
+        detail_level: moderate
+        required: false
+      - name: token_efficiency
+        description: Tokens per query vs full-context baselines
+        detail_level: moderate
+        required: false
+  - category: capabilities
+    fields:
+      - name: multimodal_support
+        description: Images, audio, video, PDF ingestion
+        detail_level: moderate
+        required: false
+      - name: connectors
+        description: Notion, Slack, Drive, Gmail, S3, etc.
+        detail_level: moderate
+        required: false
+      - name: user_profiles
+        description: Auto-built profiles from behavior
+        detail_level: moderate
+        required: false
+      - name: procedural_memory
+        description: Skills, workflows, tool-use memory
+        detail_level: moderate
+        required: false
+      - name: framework_integrations
+        description: LangChain, LangGraph, CrewAI, LiteLLM, etc.
+        detail_level: moderate
+        required: false
+  - category: benchmarks
+    fields:
+      - name: locomo_scores
+        description: LoCoMo LLM-judge or F1 scores if published
+        detail_level: moderate
+        required: false
+      - name: longmemeval_scores
+        description: LongMemEval scores by category if published
+        detail_level: moderate
+        required: false
+      - name: beam_scores
+        description: BEAM 1M/10M scores if published
+        detail_level: moderate
+        required: false
+      - name: benchmark_methodology
+        description: How evaluations are run and compared
+        detail_level: moderate
+        required: false
+  - category: gaps_and_roadmap
+    fields:
+      - name: stated_unsolved_problems
+        description: Open problems the vendor or paper explicitly calls out
+        detail_level: detailed
+        required: true
+      - name: public_roadmap
+        description: Known upcoming features from docs, GitHub, blogs
+        detail_level: moderate
+        required: false
+      - name: known_limitations
+        description: Documented limitations, scale caps, failure modes
+        detail_level: detailed
+        required: true
+  - category: memorable_delta
+    fields:
+      - name: memorable_has
+        description: Capabilities Memorable already implements vs this item
+        detail_level: detailed
+        required: true
+      - name: memorable_lacks
+        description: Gaps Memorable must close to match or exceed this item
+        detail_level: detailed
+        required: true
+      - name: memorable_should_port
+        description: Specific techniques Memorable should adopt from this item
+        detail_level: detailed
+        required: true
+      - name: memorable_should_skip
+        description: Techniques not worth porting given Memorable thesis
+        detail_level: moderate
+        required: false
+      - name: priority_for_memorable
+        description: P0–P3 priority for closing gaps
+        detail_level: brief
+        required: true

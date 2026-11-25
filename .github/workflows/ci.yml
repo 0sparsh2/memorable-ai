@@ -9,21 +9,27 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      MEMORABLE_LLM__DEFAULT_MODEL: none  # tests never call an LLM
     strategy:
+      fail-fast: false  # one version's failure must not hide the others
       matrix:
-        python-version: ["3.8", "3.9", "3.10", "3.11"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
-    - uses: actions/checkout@v3
-    
+    - uses: actions/checkout@v4
+
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
-    
+        cache: pip
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
+        # CPU-only PyTorch: the default PyPI wheel pulls ~2.5 GB of CUDA libraries
+        pip install torch --index-url https://download.pytorch.org/whl/cpu
         pip install -r requirements.txt
         pip install -e ".[dev]"
         python -m pip list | grep memorable || echo "Package installed"
@@ -43,8 +49,12 @@ jobs:
         TEST_COUNT=$(pytest tests/ --collect-only -q 2>&1 | grep -E "test session starts|collected" | tail -1 || echo "0")
         echo "Test collection result: $TEST_COUNT"
         
-        # Run tests with coverage, but don't fail on coverage requirement for now
-        pytest tests/ -v --cov=memorable_ai --cov-report=xml --cov-report=term-missing --cov-fail-under=0 || true
+        # LOCOMO harness smoke (no API keys, no dataset download required for unit tests)
+        pytest tests/unit/test_locomo_loader.py tests/unit/test_locomo_smoke.py -q --no-cov
+        
+        # Run tests with coverage. Test failures fail the build; the coverage threshold
+        # is not enforced yet (CLI/Neo4j/integrations are still below 80%).
+        pytest tests/ -v --cov=memorable_ai --cov-report=xml --cov-report=term-missing --cov-fail-under=0
         
         # Check if any tests actually ran
         if [ -f coverage.xml ]; then
@@ -56,9 +66,11 @@ jobs:
         fi
     
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v3
+      if: matrix.python-version == '3.12'
+      uses: codecov/codecov-action@v5
+      continue-on-error: true  # coverage upload is informational
       with:
-        file: ./coverage.xml
+        files: ./coverage.xml
         flags: unittests
         name: codecov-umbrella
 
@@ -67,12 +79,12 @@ jobs:
     needs: test
     
     steps:
-    - uses: actions/checkout@v3
-    
+    - uses: actions/checkout@v4
+
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
-        python-version: "3.10"
+        python-version: "3.12"
     
     - name: Install build dependencies
       run: |

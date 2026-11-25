@@ -64,6 +64,7 @@ class TemporalMemory:
         memory = {
             "content": content,
             "type": memory_type,
+            "valid_from": timestamp,
             "metadata": {
                 **metadata,
                 "timestamp": timestamp.isoformat(),
@@ -273,3 +274,109 @@ class TemporalMemory:
             "memories_without_time": len(memories_without_time),
         }
 
+
+
+# ---------------------------------------------------------------------------
+# Relative-date anchoring
+#
+# The May 2026 LOCOMO diagnosis traced most temporal misses to facts stored with
+# unresolved relative dates ("yesterday", "last week"). Facts are anchored to the
+# session date at write time so they stay true when read months later.
+# ---------------------------------------------------------------------------
+
+import calendar as _calendar
+import re as _re
+from datetime import timedelta as _timedelta
+
+_NUM_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
+
+
+def _week_start(d: datetime) -> datetime:
+    return d - _timedelta(days=d.weekday())
+
+
+def _shift_month(d: datetime, months: int) -> datetime:
+    m = d.month - 1 + months
+    y = d.year + m // 12
+    m = m % 12 + 1
+    return d.replace(year=y, month=m, day=min(d.day, _calendar.monthrange(y, m)[1]))
+
+
+def anchor_relative_dates(text: str, ref: Optional[datetime]) -> "tuple[str, Optional[str]]":
+    """
+    Rewrite relative date expressions in ``text`` as absolute dates relative to
+    ``ref`` (the time the statement was made). Returns ``(new_text, event_date)``
+    where ``event_date`` is the ISO date of the first resolved expression.
+    """
+    if not text or ref is None:
+        return text, None
+    resolved: List[str] = []
+
+    def day(d: datetime) -> str:
+        return d.strftime("%Y-%m-%d")
+
+    def sub(pattern: str, fn) -> None:
+        nonlocal text
+
+        def _repl(m):
+            out, iso = fn(m)
+            if iso:
+                resolved.append(iso)
+            return out
+
+        text = _re.sub(pattern, _repl, text, flags=_re.IGNORECASE)
+
+    sub(r"\byesterday\b", lambda m: (f"on {day(ref - _timedelta(days=1))}", day(ref - _timedelta(days=1))))
+    sub(r"\btomorrow\b", lambda m: (f"on {day(ref + _timedelta(days=1))}", day(ref + _timedelta(days=1))))
+    sub(r"\b(?:today|tonight|this (?:morning|afternoon|evening))\b", lambda m: (f"on {day(ref)}", day(ref)))
+
+    def _ago(m):
+        n_raw = m.group(1).lower()
+        n = int(n_raw) if n_raw.isdigit() else _NUM_WORDS.get(n_raw, 1)
+        unit = m.group(2).lower()
+        if unit.startswith("day"):
+            d = ref - _timedelta(days=n)
+            return f"on {day(d)}", day(d)
+        if unit.startswith("week"):
+            d = _week_start(ref - _timedelta(weeks=n))
+            return f"in the week of {day(d)}", day(d)
+        if unit.startswith("month"):
+            d = _shift_month(ref, -n)
+            return f"in {d.strftime('%B %Y')}", d.strftime("%Y-%m-01")
+        if unit.startswith("year"):
+            return f"in {ref.year - n}", f"{ref.year - n}-01-01"
+        return m.group(0), None
+
+    sub(r"\b(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten) (days?|weeks?|months?|years?) ago\b", _ago)
+
+    def _last_next(m):
+        which = m.group(1).lower()
+        unit = m.group(2).lower()
+        sign = -1 if which == "last" else 1
+        if unit == "week":
+            d = _week_start(ref + _timedelta(weeks=sign))
+            return f"in the week of {day(d)}", day(d)
+        if unit == "month":
+            d = _shift_month(ref, sign)
+            return f"in {d.strftime('%B %Y')}", d.strftime("%Y-%m-01")
+        if unit == "year":
+            return f"in {ref.year + sign}", f"{ref.year + sign}-01-01"
+        if unit == "weekend":
+            sat = _week_start(ref) + _timedelta(days=5) + _timedelta(weeks=sign)
+            return f"on the weekend of {day(sat)}", day(sat)
+        return m.group(0), None
+
+    sub(r"\b(last|next) (week|month|year|weekend)\b", _last_next)
+
+    def _weekday(m):
+        which = m.group(1).lower()
+        target = list(_calendar.day_name).index(m.group(2).capitalize())
+        delta = (ref.weekday() - target) % 7 or 7
+        d = ref - _timedelta(days=delta) if which == "last" else ref + _timedelta(days=((target - ref.weekday()) % 7 or 7))
+        return f"on {day(d)}", day(d)
+
+    sub(r"\b(last|next) (monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", _weekday)
+    return text, (resolved[0] if resolved else None)

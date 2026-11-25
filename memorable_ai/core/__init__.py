@@ -6,6 +6,8 @@ from memorable_ai.core.extraction import MemoryExtractor
 from memorable_ai.core.retrieval import HybridRetriever
 from memorable_ai.core.consolidation import MemoryConsolidator
 from memorable_ai.core.temporal import TemporalMemory
+from memorable_ai.core.update import MemoryUpdater
+from memorable_ai.core.summary import ConversationSummaryStore
 from memorable_ai.core.errors import (
     MemorableError,
     StorageError,
@@ -23,6 +25,8 @@ __all__ = [
     "HybridRetriever",
     "MemoryConsolidator",
     "TemporalMemory",
+    "MemoryUpdater",
+    "ConversationSummaryStore",
     "MemorableError",
     "StorageError",
     "RetrievalError",

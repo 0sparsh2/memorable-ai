@@ -1,0 +1,26 @@
+{
+  "_note": "Self-reported end-to-end answer accuracy (%) as compiled on 2026-11-15/16 for docs/industry comparison. Each vendor uses its own answer model, judge and memory budget; none is directly comparable to our protocol. null = not stated in the source we read.",
+  "entries": [
+    {"system": "Agent Zero Memory", "bench": "locomo", "score": 93.6, "answer_model": null, "judge": "LLM judge (vendor)",
+     "context": null, "source": "https://arxiv.org/pdf/2608.29606"},
+    {"system": "Mem0 (April 2026)", "bench": "locomo", "score": 92.5, "answer_model": "GPT-4o / GPT-5 class",
+     "judge": "Mem0 unified judge (lenient)", "context": "up to 200 memories (~7k tokens)",
+     "source": "https://mem0.ai/blog/state-of-ai-agent-memory-2026"},
+    {"system": "Hindsight (Vectorize)", "bench": "locomo", "score": 92.0, "answer_model": null, "judge": "LLM judge (vendor)",
+     "context": null, "source": "https://arxiv.org/html/2512.12818v1"},
+    {"system": "Zep / Graphiti", "bench": "locomo", "score": 81.5, "score_range": "80-83", "answer_model": null,
+     "judge": "LLM judge (vendor)", "context": null, "source": "vendor posts, compiled in the Nov 2026 landscape report"},
+    {"system": "Letta", "bench": "locomo", "score": 74.0, "answer_model": null, "judge": "LLM judge (vendor)",
+     "context": "filesystem tools", "source": "vendor post, compiled in the Nov 2026 landscape report"},
+    {"system": "Agent Zero Memory", "bench": "lme", "score": 95.6, "answer_model": null, "judge": "LongMemEval judge",
+     "context": null, "source": "https://arxiv.org/pdf/2608.29606"},
+    {"system": "Mastra Observational Memory", "bench": "lme", "score": 94.9, "answer_model": null,
+     "judge": "LongMemEval judge", "context": null, "source": "https://mastra.ai/research/observational-memory"},
+    {"system": "Hindsight (Vectorize)", "bench": "lme", "score": 94.6, "answer_model": null, "judge": "LongMemEval judge",
+     "context": null, "source": "https://hindsight.vectorize.io/blog/2026/03/23/agent-memory-benchmark"},
+    {"system": "Mem0 (April 2026)", "bench": "lme", "score": 94.4, "answer_model": "GPT-4o / GPT-5 class",
+     "judge": "LongMemEval judge", "context": "up to 200 memories", "source": "https://mem0.ai/blog/state-of-ai-agent-memory-2026"},
+    {"system": "Zep / Graphiti", "bench": "lme", "score": 71.2, "answer_model": "gpt-4o", "judge": "LongMemEval judge",
+     "context": null, "source": "Zep paper (LongMemEval-S, gpt-4o)"}
+  ]
+}

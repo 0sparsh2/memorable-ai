@@ -1,0 +1,16 @@
+{
+  "source": "Mem0 paper/blog targets for LOCOMO-style LLM-judge comparison (not apples-to-apples with our subset)",
+  "mem0_paper_relative": "26% improvement vs OpenAI memory on LoCoMo (arXiv:2504.19413)",
+  "mem0_blog_2026": "91.6% LLM-judge (full leaderboard; vendor-reported)",
+  "category_baselines_llm_judge": {
+    "single_hop": 0.85,
+    "multi_hop": 0.72,
+    "temporal": 0.68,
+    "open_domain": 0.65,
+    "overall": 0.725
+  },
+  "latency_claims": {
+    "mem0_retrieval_ms": 100,
+    "mem0_token_savings_pct": 90
+  }
+}

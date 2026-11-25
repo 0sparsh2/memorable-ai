@@ -1,0 +1,48 @@
+topic: "Agent memory landscape 2026 — competitive analysis for Memorable"
+items:
+  - name: Memorable
+    category: OSS library
+    description: Self-audit of memorable-ai v0.1.x — interceptor + SQL + optional graph (implementation truth)
+  - name: Mem0
+    category: OSS + managed
+    description: Mem0 open source and managed platform including 2026 token-efficient memory algorithm
+  - name: Supermemory
+    category: OSS + managed API
+    description: Supermemory memory graph, connectors, multimodal ingest, and developer platform
+  - name: Memori
+    category: OSS
+    description: GibsonAI Memori — interceptor-based SQL memory for LLM apps
+  - name: Zep_Graphiti
+    category: OSS + managed
+    description: Zep temporal knowledge graph (Graphiti) for agent memory
+  - name: Letta
+    category: OSS
+    description: Letta (formerly MemGPT) — OS-inspired core/archival/recall memory tiers
+  - name: LangMem
+    category: OSS LangChain
+    description: LangChain LangMem toolkit and LangGraph memory integration
+  - name: LoCoMo_benchmark
+    category: Research artifact
+    description: SNAP LoCoMo benchmark for long-term conversational memory evaluation
+  - name: LongMemEval_benchmark
+    category: Research artifact
+    description: LongMemEval benchmark for knowledge update and multi-session recall
+  - name: BEAM_benchmark
+    category: Research artifact
+    description: BEAM benchmark at 1M–10M token scale for production memory systems
+  - name: Mem0_paper
+    category: Paper
+    description: "Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory (arXiv:2504.19413)"
+  - name: Zep_temporal_KG_paper
+    category: Paper
+    description: "Zep: A Temporal Knowledge Graph Architecture for Agent Memory (arXiv:2501.13956)"
+  - name: RAG_full_context_baselines
+    category: Baseline
+    description: RAG chunking and full-context baselines used in memory benchmark literature
+  - name: OpenAI_Memory_proprietary
+    category: Baseline
+    description: OpenAI Memory and other proprietary memory-augmented chat products
+execution:
+  batch_size: 3
+  items_per_agent: 1
+  output_dir: "./agent_memory_landscape_2026/results"

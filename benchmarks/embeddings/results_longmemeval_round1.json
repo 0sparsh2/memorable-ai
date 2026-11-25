@@ -1,0 +1,166 @@
+[
+  {
+    "model": "bm25",
+    "unique_texts": 67473,
+    "encode_s": 0.0,
+    "session@10": {
+      "knowledge-update": 1.0,
+      "multi-session": 1.0,
+      "overall": 0.98,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 0.88,
+      "single-session-user": 1.0,
+      "temporal-reasoning": 1.0
+    },
+    "session@5": {
+      "knowledge-update": 1.0,
+      "multi-session": 0.96,
+      "overall": 0.96,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 0.84,
+      "single-session-user": 1.0,
+      "temporal-reasoning": 0.96
+    },
+    "turn@10": {
+      "knowledge-update": 0.96,
+      "multi-session": 0.8,
+      "overall": 0.86,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 0.64,
+      "single-session-user": 1.0,
+      "temporal-reasoning": 0.76
+    },
+    "turn@5": {
+      "knowledge-update": 0.84,
+      "multi-session": 0.72,
+      "overall": 0.767,
+      "single-session-assistant": 0.96,
+      "single-session-preference": 0.48,
+      "single-session-user": 1.0,
+      "temporal-reasoning": 0.6
+    }
+  },
+  {
+    "model": "sentence-transformers/all-MiniLM-L6-v2",
+    "unique_texts": 67473,
+    "encode_s": 215.2,
+    "session@10": {
+      "knowledge-update": 1.0,
+      "multi-session": 1.0,
+      "overall": 0.993,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 0.96,
+      "single-session-user": 1.0,
+      "temporal-reasoning": 1.0
+    },
+    "session@5": {
+      "knowledge-update": 0.96,
+      "multi-session": 1.0,
+      "overall": 0.98,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 0.96,
+      "single-session-user": 0.96,
+      "temporal-reasoning": 1.0
+    },
+    "turn@10": {
+      "knowledge-update": 0.88,
+      "multi-session": 0.96,
+      "overall": 0.84,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 0.68,
+      "single-session-user": 0.92,
+      "temporal-reasoning": 0.6
+    },
+    "turn@5": {
+      "knowledge-update": 0.8,
+      "multi-session": 0.68,
+      "overall": 0.74,
+      "single-session-assistant": 0.96,
+      "single-session-preference": 0.64,
+      "single-session-user": 0.88,
+      "temporal-reasoning": 0.48
+    }
+  },
+  {
+    "model": "onnx-int8:sentence-transformers/all-MiniLM-L6-v2",
+    "unique_texts": 67473,
+    "encode_s": 356.6,
+    "session@10": {
+      "knowledge-update": 1.0,
+      "multi-session": 1.0,
+      "overall": 0.993,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 0.96,
+      "single-session-user": 1.0,
+      "temporal-reasoning": 1.0
+    },
+    "session@5": {
+      "knowledge-update": 0.96,
+      "multi-session": 1.0,
+      "overall": 0.98,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 0.96,
+      "single-session-user": 0.96,
+      "temporal-reasoning": 1.0
+    },
+    "turn@10": {
+      "knowledge-update": 0.88,
+      "multi-session": 1.0,
+      "overall": 0.847,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 0.68,
+      "single-session-user": 0.92,
+      "temporal-reasoning": 0.6
+    },
+    "turn@5": {
+      "knowledge-update": 0.8,
+      "multi-session": 0.64,
+      "overall": 0.74,
+      "single-session-assistant": 0.96,
+      "single-session-preference": 0.68,
+      "single-session-user": 0.88,
+      "temporal-reasoning": 0.48
+    }
+  },
+  {
+    "model": "static:minishlab/potion-base-8M",
+    "unique_texts": 67473,
+    "encode_s": 5.5,
+    "session@10": {
+      "knowledge-update": 1.0,
+      "multi-session": 1.0,
+      "overall": 0.973,
+      "single-session-assistant": 1.0,
+      "single-session-preference": 0.88,
+      "single-session-user": 1.0,
+      "temporal-reasoning": 0.96
+    },
+    "session@5": {
+      "knowledge-update": 1.0,
+      "multi-session": 1.0,
+      "overall": 0.933,
+      "single-session-assistant": 0.96,
+      "single-session-preference": 0.68,
+      "single-session-user": 1.0,
+      "temporal-reasoning": 0.96
+    },
+    "turn@10": {
+      "knowledge-update": 0.92,
+      "multi-session": 1.0,
+      "overall": 0.873,
+      "single-session-assistant": 0.92,
+      "single-session-preference": 0.56,
+      "single-session-user": 1.0,
+      "temporal-reasoning": 0.84
+    },
+    "turn@5": {
+      "knowledge-update": 0.84,
+      "multi-session": 0.88,
+      "overall": 0.787,
+      "single-session-assistant": 0.88,
+      "single-session-preference": 0.52,
+      "single-session-user": 0.92,
+      "temporal-reasoning": 0.68
+    }
+  }
+]

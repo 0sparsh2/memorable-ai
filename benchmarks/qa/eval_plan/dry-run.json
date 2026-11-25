@@ -1,0 +1,51 @@
+{
+  "checks": {
+    "price-table": "ok",
+    "input-shapes": "ok",
+    "length-budget": "ok",
+    "reservation-fits-cap": "ok",
+    "memory": "ok (retrieval peak RSS 3.0 GB on a 16 GB machine)",
+    "split-disjointness": "ok",
+    "scorer-on-decoys": "ok (stub, exact-match)"
+  },
+  "diagnostics": {
+    "locomo_items": 1540,
+    "locomo_by_category": {
+      "multi-hop": 282,
+      "temporal": 321,
+      "open-domain": 96,
+      "single-hop": 841
+    },
+    "lme_items": 500,
+    "lme_dev": 150,
+    "lme_heldout": 350,
+    "lme_heldout_abstention": 30,
+    "a0_lme_subset": 99,
+    "a0_lme_dev_max_tokens_est": 126433,
+    "a0_prompts_over_1M": 0,
+    "dry_truncated_turns_lme_3_haystacks": 61,
+    "dry_empty_contexts": 0
+  },
+  "projection_usd_without_A4": 45.6,
+  "projection_A4_usd": 5.23,
+  "cap_usd": 60.0,
+  "assumptions": {
+    "answer_out_tokens_incl_thinking": 300,
+    "judge_tokens": {
+      "strict": [
+        250,
+        50
+      ],
+      "lenient": [
+        850,
+        100
+      ],
+      "lme": [
+        400,
+        50
+      ]
+    },
+    "a0_locomo_prefix_cache": "not assumed (worst case)"
+  },
+  "result": "pass"
+}
